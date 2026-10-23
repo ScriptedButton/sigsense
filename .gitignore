@@ -1,0 +1,23 @@
+node_modules/
+.next/
+dist/
+out/
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+data/raw/
+data/processed/
+data/synthetic/
+data/radioml/
+# Keep shipped model artifacts under models/; ignore ad-hoc checkpoints elsewhere
+*.pth
+/checkpoints/
+.DS_Store
+.env
+.env.local
+*.log
+.turbo/

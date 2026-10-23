@@ -1,0 +1,15 @@
+{
+  "name": "sigsense",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @sigsense/web dev",
+    "dev:web": "pnpm --filter @sigsense/web dev",
+    "dev:api": "bash apps/api/run.sh",
+    "train": ".venv/bin/python packages/ml/scripts/train.py --source mixed",
+    "build": "pnpm --filter @sigsense/web build",
+    "lint": "pnpm --filter @sigsense/web lint"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
