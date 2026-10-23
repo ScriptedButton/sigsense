@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sigsense_ml.classes import EMBEDDING_DIM, NUM_CLASSES
+from sigsense_ml.classes import EMBEDDING_DIM, NUM_CLASSES, SIGNAL_CLASSES
 
 
 class ConvBlock(nn.Module):
@@ -38,6 +38,8 @@ class SignalEmbeddingNet(nn.Module):
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
+        self.classes = SIGNAL_CLASSES[:num_classes]
+        self.temperature = 1.0
         self.features = nn.Sequential(
             ConvBlock(1, 32),
             ConvBlock(32, 64),
@@ -71,20 +73,30 @@ def load_model(
     path: str | Path | None = None,
     *,
     device: str | torch.device | None = None,
-    num_classes: int = NUM_CLASSES,
+    num_classes: int | None = None,
 ) -> SignalEmbeddingNet:
     """Load weights if present; otherwise return randomly initialized model."""
     if device is None:
         device = torch.device("cpu")
-    model = SignalEmbeddingNet(num_classes=num_classes)
+    ckpt = None
     if path is not None and Path(path).is_file():
         ckpt = torch.load(path, map_location=device, weights_only=False)
         state = ckpt.get("model_state", ckpt)
+        stored_count = state["classifier.weight"].shape[0]
+        if num_classes is not None and stored_count != num_classes:
+            raise ValueError(f"Checkpoint num_classes={stored_count} != {num_classes}")
+        num_classes = stored_count
+    model = SignalEmbeddingNet(num_classes=num_classes or NUM_CLASSES,
+                               embedding_dim=ckpt.get("embedding_dim", EMBEDDING_DIM) if ckpt else EMBEDDING_DIM)
+    if ckpt is not None:
+        labels = ckpt.get("classes", SIGNAL_CLASSES[:num_classes])
+        if len(labels) != num_classes or len(set(labels)) != len(labels):
+            raise ValueError("Checkpoint classes do not match classifier outputs")
+        model.classes = labels
+        model.temperature = float(ckpt.get("temperature", 1.0))
+        if not 0 < model.temperature < float("inf"):
+            raise ValueError("Invalid checkpoint temperature")
         model.load_state_dict(state)
-        if "num_classes" in ckpt and ckpt["num_classes"] != num_classes:
-            raise ValueError(
-                f"Checkpoint num_classes={ckpt['num_classes']} != {num_classes}"
-            )
     model.to(device)
     model.eval()
     return model

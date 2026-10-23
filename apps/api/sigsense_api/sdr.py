@@ -23,7 +23,7 @@ from sigsense_ml.ble import (
     generate_ble_adv_iq,
     modulate_ble_packet_iq,
 )
-from sigsense_ml.classes import SIGNAL_CLASSES
+from sigsense_ml.classes import SIGNAL_CLASSES, CAPTURE_ONLY_CLASSES
 from sigsense_ml.preprocess import iq_to_spectrogram
 from sigsense_ml.synthetic import generate_iq
 
@@ -129,6 +129,8 @@ class LiveSDRService:
         ble_hop: bool | None = None,
     ) -> TunerState:
         async with self._lock:
+            if demo_class in CAPTURE_ONLY_CLASSES:
+                raise ValueError(f"{demo_class} requires captured IQ; no demo generator is available")
             if center_freq_hz is not None:
                 self.state.center_freq_hz = float(center_freq_hz)
             if sample_rate_hz is not None:

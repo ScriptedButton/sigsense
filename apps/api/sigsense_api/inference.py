@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from sigsense_ml.classes import SIGNAL_CLASSES, idx_to_class
 from sigsense_ml.library import SignalLibrary
 from sigsense_ml.meta import estimate_rf_meta
 from sigsense_ml.model import SignalEmbeddingNet, load_model
@@ -23,7 +22,6 @@ from sigsense_ml.preprocess import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODELS = REPO_ROOT / "models"
 OPEN_SET_THRESHOLD = 0.45
-NEIGHBOR_THRESHOLD = 0.55
 
 
 @dataclass
@@ -62,13 +60,13 @@ class InferenceEngine:
         tensor = torch.from_numpy(spectrogram_to_tensor(spec)).float().to(self.device)
         with torch.no_grad():
             logits, emb = self.model(tensor)
-            probs = F.softmax(logits, dim=1)[0]
+            probs = F.softmax(logits / self.model.temperature, dim=1)[0]
             conf, pred_idx = torch.max(probs, dim=0)
             conf_f = float(conf.item())
-            pred_label = idx_to_class[int(pred_idx.item())]
+            pred_label = self.model.classes[int(pred_idx.item())]
             topk = torch.topk(probs, k=min(5, probs.numel()))
             alternatives = [
-                {"label": idx_to_class[int(i.item())], "confidence": float(p.item())}
+                {"label": self.model.classes[int(i.item())], "confidence": float(p.item())}
                 for p, i in zip(topk.values, topk.indices)
             ]
             emb_np = emb[0].cpu().numpy()
@@ -78,12 +76,9 @@ class InferenceEngine:
         label = pred_label
         confidence = conf_f
 
-        # If low classifier confidence, prefer library neighbor when strong
-        if is_unknown and neighbors and neighbors[0]["similarity"] >= NEIGHBOR_THRESHOLD:
-            label = neighbors[0]["label"]
-            confidence = float(neighbors[0]["similarity"])
-            is_unknown = False
-        elif is_unknown:
+        # Cosine similarity is not a calibrated class probability. Keep neighbors
+        # as suggestions; do not use them to override the unknown decision.
+        if is_unknown:
             label = "unknown"
 
         meta = estimate_rf_meta(

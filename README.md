@@ -18,10 +18,12 @@ source .venv/bin/activate
 pip install -r apps/api/requirements.txt
 pip install -e packages/ml
 
-# Train model + seed library (TorchSig + synthetic by default; few minutes on CPU)
+# Train a candidate + library (TorchSig + synthetic). GPU recommended.
 pip install -e "packages/ml[torchsig]"
-python packages/ml/scripts/train.py --source mixed --epochs 12
+python packages/ml/scripts/train.py --source mixed --device auto --out-dir checkpoints/candidate-001
 # Also: --source synthetic|torchsig|radioml|all
+# Review candidate-001/evaluation.json before promoting its four model/library
+# artifacts to models/. The API continues to use models/.
 
 # API
 uvicorn sigsense_api.main:app --app-dir apps/api --reload --port 8000
@@ -34,6 +36,11 @@ pnpm --filter @sigsense/web dev
 Open http://localhost:3000
 
 Set `NEXT_PUBLIC_API_URL` if the API is not at `http://127.0.0.1:8000`.
+
+The signal catalog has 52 labels. The mixed generated-data profile trains 44;
+the compact profile adds captured-data classes for 49 trained labels. Checkpoints expose their own trained label list.
+See the [ML guide](packages/ml/README.md) for capture ingestion and evaluation, and
+the [accuracy research](docs/model-accuracy-research.md) for datasets and next steps.
 
 ## API
 

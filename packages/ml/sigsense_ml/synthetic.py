@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sigsense_ml.classes import SIGNAL_CLASSES
+from sigsense_ml.classes import SIGNAL_CLASSES, CAPTURE_ONLY_CLASSES
 
 
 def _awgn(iq: np.ndarray, snr_db: float, rng: np.random.Generator) -> np.ndarray:
@@ -29,6 +29,41 @@ def generate_iq(class_name: str, n: int = 8192, snr_db: float = 15.0, seed: int 
     t = np.arange(n, dtype=np.float64)
     cf = rng.uniform(-0.15, 0.15)  # relative CF offset
     name = class_name
+    if name not in SIGNAL_CLASSES:
+        raise ValueError(f"Unknown signal class: {name}")
+
+    # Demo modulation generators. Protocol training uses TorchSig/captured IQ.
+    if name in {"ASK4", "ASK8", "ASK16", "FSK4", "FSK8", "FSK16", "GFSK4", "GFSK8", "MSK", "GMSK", "16PSK", "32PSK", "QAM32", "QAM256", "APSK16", "APSK32"}:
+        sps = 8
+        count = (n + sps - 1) // sps
+        if name.startswith("ASK"):
+            order = int(name[3:])
+            symbols = rng.integers(0, order, count) / (order - 1)
+            baseband = np.repeat(symbols, sps)[:n]
+        elif "FSK" in name or name in {"MSK", "GMSK"}:
+            order = int(name.split("FSK")[-1]) if "FSK" in name else 2
+            symbols = np.repeat(2 * rng.integers(0, order, count) - order + 1, sps)[:n].astype(float)
+            if name.startswith("G"):
+                from scipy.ndimage import gaussian_filter1d
+                symbols = gaussian_filter1d(symbols, 1.5)
+            deviation = 1 / (4 * sps) if name in {"MSK", "GMSK"} else 0.2 / order
+            baseband = np.exp(2j * np.pi * deviation * np.cumsum(symbols))
+        elif name.endswith("PSK") and not name.startswith("A"):
+            order = int(name[:-3])
+            baseband = np.repeat(np.exp(2j * np.pi * rng.integers(0, order, count) / order), sps)[:n]
+        elif name.startswith("APSK"):
+            rings = [(4, 1.), (12, 2.85)] if name == "APSK16" else [(4, 1.), (12, 2.84), (16, 5.27)]
+            constellation = np.concatenate([radius * np.exp(2j * np.pi * np.arange(k) / k) for k, radius in rings])
+            baseband = np.repeat(rng.choice(constellation, count), sps)[:n]
+        else:
+            if name == "QAM32":
+                constellation = np.array([complex(i, q) for i in range(-5, 6, 2) for q in range(-5, 6, 2) if not (abs(i) == abs(q) == 5)])
+                symbols = rng.choice(constellation, count)
+            else:
+                symbols = (2 * rng.integers(0, 16, count) - 15) + 1j * (2 * rng.integers(0, 16, count) - 15)
+            baseband = np.repeat(symbols, sps)[:n]
+        baseband = baseband / np.sqrt(np.mean(np.abs(baseband) ** 2) + 1e-12)
+        return _awgn(baseband * _tone(n, cf, rng), snr_db, rng)
 
     if name == "Noise":
         iq = (
@@ -175,9 +210,7 @@ def generate_iq(class_name: str, n: int = 8192, snr_db: float = 15.0, seed: int 
             iq = np.exp(1j * phase).astype(np.complex64)
         return _awgn(iq, snr_db, rng)
 
-    # Fallback: tone in noise
-    iq = _tone(n, cf, rng)
-    return _awgn(iq, snr_db, rng)
+    raise ValueError(f"No synthetic generator for {name}")
 
 
 def sp_hilbert(x: np.ndarray) -> np.ndarray:
@@ -205,7 +238,8 @@ def random_class_batch(
     iqs: list[np.ndarray] = []
     labels: list[int] = []
     for i in range(batch_size):
-        idx = int(rng.integers(0, len(SIGNAL_CLASSES)))
+        available = [i for i, name in enumerate(SIGNAL_CLASSES) if name not in CAPTURE_ONLY_CLASSES]
+        idx = int(rng.choice(available))
         snr = float(rng.uniform(*snr_range))
         iq = generate_iq(SIGNAL_CLASSES[idx], n=n, snr_db=snr, seed=None if seed is None else seed + i)
         iqs.append(iq)

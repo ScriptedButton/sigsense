@@ -11,27 +11,36 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from sigsense_ml.classes import SIGNAL_CLASSES, class_to_idx
+from sigsense_ml.classes import SIGNAL_CLASSES, CAPTURE_ONLY_CLASSES, class_to_idx
 from sigsense_ml.preprocess import iq_to_spectrogram
 from sigsense_ml.synthetic import generate_iq
 
 # TorchSig class names -> SigSense taxonomy (many-to-one OK)
 TORCHSIG_TO_SIGSENSE: dict[str, str] = {
     "ook": "ASK",
-    "4ask": "ASK",
-    "8ask": "ASK",
+    "4ask": "ASK4",
+    "8ask": "ASK8",
+    "16ask": "ASK16",
     "2fsk": "FSK",
-    "4fsk": "FSK",
-    "8fsk": "FSK",
+    "4fsk": "FSK4",
+    "8fsk": "FSK8",
+    "16fsk": "FSK16",
     "2gfsk": "GFSK",
-    "4gfsk": "GFSK",
-    "2msk": "FSK",
-    "2gmsk": "GFSK",
+    "4gfsk": "GFSK4",
+    "8gfsk": "GFSK8",
+    "2msk": "MSK",
+    "2gmsk": "GMSK",
     "bpsk": "BPSK",
     "qpsk": "QPSK",
     "8psk": "8PSK",
+    "16psk": "16PSK",
+    "32psk": "32PSK",
     "16qam": "QAM16",
     "64qam": "QAM64",
+    "32qam": "QAM32",
+    "256qam": "QAM256",
+    "16apsk": "APSK16",
+    "32apsk": "APSK32",
     "ofdm-64": "OFDM",
     "ofdm-128": "OFDM",
     "ofdm-256": "OFDM",
@@ -43,7 +52,6 @@ TORCHSIG_TO_SIGSENSE: dict[str, str] = {
     "tone": "CW",
     "lfm-radar": "Chirp-LFM",
     "lfm-data": "Chirp-LFM",
-    "chirpss": "FMCW",
     "adsb-long": "ADS-B",
     "adsb-short": "ADS-B",
     "btle": "Bluetooth-LE",
@@ -63,7 +71,7 @@ RADIOML_TO_SIGSENSE: dict[str, str] = {
     "BPSK": "BPSK",
     "CPFSK": "FSK",
     "GFSK": "GFSK",
-    "PAM4": "ASK",
+    "PAM4": "ASK4",
     "QAM16": "QAM16",
     "QAM64": "QAM64",
     "QPSK": "QPSK",
@@ -110,9 +118,10 @@ class SyntheticSpectrogramDataset(Dataset):
         n_iq: int = 8192,
         seed: int = 0,
         class_names: list[str] | None = None,
+        augment: bool = True,
     ) -> None:
         self.items: list[tuple[np.ndarray, int]] = []
-        names = class_names or SIGNAL_CLASSES
+        names = class_names if class_names is not None else [c for c in SIGNAL_CLASSES if c not in CAPTURE_ONLY_CLASSES]
         rng = np.random.default_rng(seed)
         for name in names:
             if name not in class_to_idx:
@@ -121,7 +130,9 @@ class SyntheticSpectrogramDataset(Dataset):
             for j in range(samples_per_class):
                 snr = float(rng.uniform(0, 25))
                 iq = generate_iq(name, n=n_iq, snr_db=snr, seed=seed + ci * 1000 + j)
-                spec = _aug_spec(iq_to_spectrogram(iq), rng)
+                spec = iq_to_spectrogram(iq)
+                if augment:
+                    spec = _aug_spec(spec, rng)
                 self.items.append((spec, ci))
 
     def __len__(self) -> int:
@@ -142,6 +153,7 @@ class TorchSigSpectrogramDataset(Dataset):
         seed: int = 0,
         snr_db_min: float = 0.0,
         snr_db_max: float = 25.0,
+        augment: bool = True,
     ) -> None:
         try:
             from torchsig.datasets.datasets import TorchSigIterableDataset
@@ -200,13 +212,16 @@ class TorchSigSpectrogramDataset(Dataset):
                 target_labels=["class_name"],
                 **meta,
             )
+            ds.seed(seed + ti * 10000)
             it = iter(ds)
             while counts[ss] < samples_per_class:
                 data, _name = next(it)
                 iq = np.asarray(data).astype(np.complex64).ravel()
                 if iq.size < 1024:
                     continue
-                spec = _aug_spec(iq_to_spectrogram(iq), rng)
+                spec = iq_to_spectrogram(iq)
+                if augment:
+                    spec = _aug_spec(spec, rng)
                 self.items.append((spec, class_to_idx[ss]))
                 counts[ss] += 1
             if (ti + 1) % 6 == 0 or ti == len(targets) - 1:
@@ -226,12 +241,12 @@ class TorchSigSpectrogramDataset(Dataset):
 class MixedSpectrogramDataset(Dataset):
     """TorchSig for covered classes + synthetic for the rest."""
 
-    def __init__(self, samples_per_class: int, seed: int = 0) -> None:
+    def __init__(self, samples_per_class: int, seed: int = 0, augment: bool = True) -> None:
         covered = classes_covered_by_torchsig()
-        uncovered = [c for c in SIGNAL_CLASSES if c not in covered]
-        torch_ds = TorchSigSpectrogramDataset(samples_per_class, seed=seed)
+        uncovered = [c for c in SIGNAL_CLASSES if c not in covered and c not in CAPTURE_ONLY_CLASSES]
+        torch_ds = TorchSigSpectrogramDataset(samples_per_class, seed=seed, augment=augment)
         synth_ds = SyntheticSpectrogramDataset(
-            samples_per_class, seed=seed + 17, class_names=uncovered
+            samples_per_class, seed=seed + 17, class_names=uncovered, augment=augment
         )
         self.items = list(torch_ds.items) + list(synth_ds.items)
         print(
@@ -271,7 +286,7 @@ def ensure_radioml(data_dir: Path) -> Path:
         urllib.request.urlretrieve(RADIOML_URL, archive)  # noqa: S310
     print(f"Extracting {archive} ...")
     with tarfile.open(archive, "r:bz2") as tar:
-        tar.extractall(data_dir)
+        tar.extractall(data_dir, filter="data")
 
     for path in data_dir.rglob("RML2016.10a*"):
         if path.suffix in {".pkl", ".dat"} and path.is_file():
@@ -290,7 +305,8 @@ class RadioMLSpectrogramDataset(Dataset):
         snr_min: int = 0,
         seed: int = 0,
         split: str = "train",
-        train_frac: float = 0.8,
+        train_frac: float = 0.7,
+        augment: bool = True,
     ) -> None:
         path = ensure_radioml(Path(data_dir))
         with open(path, "rb") as f:
@@ -318,10 +334,14 @@ class RadioMLSpectrogramDataset(Dataset):
         for ss, iqs in buckets.items():
             if not iqs:
                 continue
-            rng.shuffle(iqs)
+            # Partition RNG must not depend on augmentation/sample-cap consumption.
+            np.random.default_rng(seed + class_to_idx[ss]).shuffle(iqs)
             n = len(iqs)
             cut = int(n * train_frac)
-            chosen = iqs[:cut] if split == "train" else iqs[cut:]
+            val_end = cut + (n - cut) // 2
+            if split not in {"train", "val", "test"}:
+                raise ValueError(f"Unknown split: {split}")
+            chosen = {"train": iqs[:cut], "val": iqs[cut:val_end], "test": iqs[val_end:]}[split]
             if samples_per_class is not None:
                 chosen = chosen[:samples_per_class]
             for iq in chosen:
@@ -329,7 +349,9 @@ class RadioMLSpectrogramDataset(Dataset):
                 if iq.size < 2048:
                     reps = int(np.ceil(2048 / iq.size))
                     iq = np.tile(iq, reps)[:4096]
-                spec = _aug_spec(iq_to_spectrogram(iq), rng)
+                spec = iq_to_spectrogram(iq)
+                if augment:
+                    spec = _aug_spec(spec, rng)
                 self.items.append((spec, class_to_idx[ss]))
 
         print(

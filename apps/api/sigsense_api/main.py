@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sigsense_api.inference import InferenceEngine
 from sigsense_api.sdr import LiveSDRService
 from sigsense_ml.ble import BLE_CHANNELS_MHZ, decode_ble_iq
-from sigsense_ml.classes import SIGNAL_CLASSES
+from sigsense_ml.classes import SIGNAL_CLASSES, CAPTURE_ONLY_CLASSES
 from sigsense_ml.preprocess import load_iq_file
 
 
@@ -96,12 +96,12 @@ class BleReplayRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "classes": len(SIGNAL_CLASSES)}
+    return {"status": "ok", "classes": len(get_engine().model.classes)}
 
 
 @app.get("/classes")
 def classes() -> dict:
-    return {"classes": SIGNAL_CLASSES}
+    return {"classes": get_engine().model.classes, "catalog": SIGNAL_CLASSES}
 
 
 @app.post("/analyze/image", response_model=AnalyzeResponse)
@@ -264,6 +264,8 @@ def sdr_tuner() -> dict:
 
 @app.post("/sdr/tuner")
 async def sdr_configure(body: TunerConfig) -> dict:
+    if body.demo_class in CAPTURE_ONLY_CLASSES:
+        raise HTTPException(400, f"{body.demo_class} requires captured IQ; no demo generator is available")
     st = await sdr.configure(
         center_freq_hz=body.center_freq_hz,
         sample_rate_hz=body.sample_rate_hz,

@@ -131,12 +131,16 @@ def load_iq_file(
 def iq_to_spectrogram(
     iq: np.ndarray,
     *,
-    n_fft: int = 512,
+    n_fft: int | None = None,
     hop_length: int | None = None,
     size: int = SPEC_SIZE,
 ) -> np.ndarray:
     """Convert complex IQ to a log-magnitude spectrogram of shape (size, size)."""
     iq = np.asarray(iq, dtype=np.complex64).ravel()
+    if n_fft is None:
+        # Keep several time bins for short dataset/native IQ bursts. A 512-point
+        # STFT on 128 samples otherwise produces a single repeated image column.
+        n_fft = min(512, max(16, 2 ** int(np.floor(np.log2(max(16, iq.size // 4))))))
     if iq.size < n_fft:
         pad = n_fft - iq.size
         iq = np.pad(iq, (0, pad))
