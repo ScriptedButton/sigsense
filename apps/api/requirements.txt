@@ -10,3 +10,14 @@ faiss-cpu>=1.7
 pydantic>=2
 aiofiles>=23
 websockets>=12
+# Server-side speech-to-text (sigsense_api/stt.py). Pulls ctranslate2, onnxruntime
+# (Silero VAD), av and tokenizers; torch is not touched. Optional: the API starts
+# without it and /transcribe/status reports available=false.
+faster-whisper>=1.1
+# Digital voice (sigsense_api/dvoice): numba compiles the symbol-timing, sync and Viterbi
+# loops. Optional to import (a pure-Python fallback exists) but REQUIRED for real time: without
+# it a channel needs far more than one core. numba caches compiled kernels on disk; after editing
+# a kernel file, delete the stale cache (find sigsense_api/dvoice -name '*.nbi' -o -name '*.nbc').
+numba>=0.59
+# Optional extras for digital voice (not hard requirements): pyserial for DVSI hardware vocoders;
+# a user-built local codec library for IMBE/AMBE (see docs/digital-voice-codec-setup.md).

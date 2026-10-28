@@ -6,21 +6,36 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "rtl-server": "tsx server/rtl-bridge/index.ts",
+    "train:signal-id": "tsx scripts/signal-id/train.ts",
+    "fetch:signal-catalog": "tsx scripts/signal-id/fetch-catalog.ts",
+    "fetch:artemis": "tsx scripts/signal-id/fetch-artemis.ts",
+    "fetch:shortwave": "tsx scripts/shortwave/fetch-schedule.ts"
   },
   "dependencies": {
+    "@e04/ft8ts": "^0.0.14",
+    "@huggingface/transformers": "^4.2.0",
+    "@jtarrio/signals": "^0.10.1",
+    "@jtarrio/webrtlsdr": "^3.0.6",
     "next": "16.4.2",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "three": "^0.185.1",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.185.4",
+    "@types/w3c-web-usb": "^1.0.14",
+    "@types/ws": "^8.18.2",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
     "tailwindcss": "^4",
+    "tsx": "^4.23.8",
     "typescript": "^5"
   },
   "packageManager": "pnpm@11.20.0"

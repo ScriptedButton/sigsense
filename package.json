@@ -2,12 +2,17 @@
   "name": "sigsense",
   "private": true,
   "scripts": {
-    "dev": "pnpm --filter @sigsense/web dev",
+    "dev": "pnpm run \"/^dev:(api|web)$/\"",
     "dev:web": "pnpm --filter @sigsense/web dev",
     "dev:api": "bash apps/api/run.sh",
     "train": ".venv/bin/python packages/ml/scripts/train.py --source mixed",
     "build": "pnpm --filter @sigsense/web build",
-    "lint": "pnpm --filter @sigsense/web lint"
+    "lint": "pnpm --filter @sigsense/web lint",
+    "rtl-server": "pnpm --filter @sigsense/web rtl-server",
+    "train:signal-id": "pnpm --filter @sigsense/web train:signal-id",
+    "fetch:signal-catalog": "pnpm --filter @sigsense/web fetch:signal-catalog",
+    "fetch:artemis": "pnpm --filter @sigsense/web fetch:artemis",
+    "fetch:shortwave": "pnpm --filter @sigsense/web fetch:shortwave"
   },
   "engines": {
     "node": ">=20"

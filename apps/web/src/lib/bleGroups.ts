@@ -4,6 +4,8 @@ export type DeviceGroup = {
   key: string;
   address: string;
   label: string;
+  saved?: boolean;
+  identified?: boolean;
   led: boolean;
   packetCount: number;
   packets: BlePacket[];
@@ -19,14 +21,30 @@ function looksLikeLedRemote(p: BlePacket): boolean {
 }
 
 function localName(p: BlePacket): string | null {
-  const ad = p.ad_structures?.find(
-    (a) => a.type === 0x08 || a.type === 0x09,
-  );
+  const ad = p.ad_structures?.find((a) => a.type === 0x08 || a.type === 0x09);
   return ad?.detail?.trim() || null;
 }
 
 export function packetKey(p: BlePacket): string {
-  return `${p.header_hex}:${p.payload_hex}`;
+  return `${p.capture_id ?? "legacy"}:${p.access_address}:${p.channel}:${p.phy ?? "LE1M"}:${p.sample_offset ?? p.offset_bits}:${p.header_hex}:${p.payload_hex}`;
+}
+
+/** Keep a bounded recent window without treating repeated RF broadcasts as duplicates. */
+export function mergeRecentPackets(
+  previous: BlePacket[],
+  incoming: BlePacket[],
+  limit = 100,
+): BlePacket[] {
+  const packets = new Map(previous.map((p) => [packetKey(p), p]));
+  let changed = false;
+  for (const p of incoming) {
+    const key = packetKey(p);
+    if (p.crc_ok && !packets.has(key)) {
+      packets.set(key, p);
+      changed = true;
+    }
+  }
+  return changed ? [...packets.values()].slice(-limit) : previous;
 }
 
 export function isLedRemotePacket(p: BlePacket): boolean {
@@ -38,20 +56,27 @@ export function isAppleContinuityPacket(p: BlePacket): boolean {
   if (looksLikeLedRemote(p)) return false;
   if (p.summary?.includes("Apple Continuity")) return true;
   return (
-    p.ad_structures?.some((a) => a.detail?.includes("Apple Continuity")) ??
-    false
+    p.ad_structures?.some(
+      (a) =>
+        a.detail?.includes("Apple Continuity") ||
+        a.detail?.includes("Apple manufacturer data"),
+    ) ?? false
   );
 }
 
 export function isAdvertiserPdu(p: BlePacket): boolean {
-  return (
-    p.pdu_type_name.startsWith("ADV") || p.pdu_type_name === "SCAN_RSP"
-  );
+  return p.pdu_type_name.startsWith("ADV") || p.pdu_type_name === "SCAN_RSP";
 }
 
 export function deviceKey(p: BlePacket): string {
-  if (p.adv_address) return p.adv_address.toUpperCase();
-  return `anon:${packetKey(p)}`;
+  if (p.adv_address) {
+    const header = parseInt(p.header_hex.slice(0, 2), 16);
+    const random = !!(header & ([3, 5].includes(p.pdu_type) ? 0x80 : 0x40));
+    const addressType = p.adv_address_type ?? (p.packet_kind === "data" ? "unknown" : random ? "random" : "public");
+    return `${p.adv_address.toUpperCase()}:${addressType}`;
+  }
+  if (p.packet_kind === "data") return `link:${p.access_address}`;
+  return `anon:${p.access_address}:${p.pdu_type_name}`;
 }
 
 export function groupPacketsByDevice(
@@ -79,15 +104,10 @@ export function groupPacketsByDevice(
     let label: string;
     if (names.length) label = names[0];
     else if (led) label = "LED remote";
-    else if (address.startsWith("anon:")) label = "Unknown";
-    else label = address;
-
-    list.sort((a, b) => {
-      const score = (p: BlePacket) =>
-        (looksLikeLedRemote(p) ? 0 : 1) +
-        (p.pdu_type_name.startsWith("ADV") ? 0 : 2);
-      return score(a) - score(b);
-    });
+    else if (address.startsWith("link:")) label = "Bluetooth connection";
+    else if (address.startsWith("anon:"))
+      label = "Anonymous Bluetooth broadcast";
+    else label = "Unnamed Bluetooth device";
 
     groups.push({
       key,
@@ -174,11 +194,11 @@ export function detectionsToMarkdown(
   }
   for (const g of groups) {
     lines.push("");
-    lines.push(
-      `## ${g.label}${g.led ? " (LED)" : ""}`,
-    );
+    lines.push(`## ${g.label}${g.led ? " (LED)" : ""}`);
     if (!g.address.startsWith("anon:")) {
-      lines.push(`\`${g.address}\` · ${g.packetCount} PDU${g.packetCount === 1 ? "" : "s"}`);
+      lines.push(
+        `\`${g.address}\` · ${g.packetCount} PDU${g.packetCount === 1 ? "" : "s"}`,
+      );
     } else {
       lines.push(`${g.packetCount} PDU${g.packetCount === 1 ? "" : "s"}`);
     }
@@ -189,4 +209,80 @@ export function detectionsToMarkdown(
   }
   lines.push("");
   return lines.join("\n");
+}
+
+/** Exact content identity across captures/channels; different payloads remain distinct. */
+export function broadcastKey(p: BlePacket): string {
+  return [p.access_address, p.phy ?? "LE1M", p.header_hex, p.payload_hex]
+    .map((part) => part.toLowerCase()).join(":");
+}
+
+export function broadcastType(p: BlePacket): string {
+  if (p.packet_kind === "data") return p.pdu_type_name;
+  if (looksLikeLedRemote(p)) return "Remote control broadcast";
+  if (isAppleContinuityPacket(p)) return "Apple broadcast";
+  const fields = [...new Set((p.ad_structures ?? []).map((ad) =>
+    ad.type === 255 ? "Manufacturer data" : ad.type === 8 || ad.type === 9 ? "Device name" : ad.label,
+  ))];
+  return fields.length ? fields.join(" · ") : p.pdu_type_name;
+}
+
+export function groupBroadcasts(packets: BlePacket[]) {
+  const grouped = new Map<string, {key: string; packet: BlePacket; count: number; channels: number[]}>();
+  for (const packet of packets) {
+    const key = broadcastKey(packet);
+    const group = grouped.get(key);
+    if (group) {
+      group.count += 1;
+      if (packet.channel !== null && !group.channels.includes(packet.channel))
+        group.channels.push(packet.channel);
+    } else {
+      grouped.set(key, {key, packet, count: 1, channels: packet.channel === null ? [] : [packet.channel]});
+    }
+  }
+  return [...grouped.values()];
+}
+
+
+/** Associate captured link data using decoded connection evidence, not its LL header. */
+export function attachDeviceIdentity(packets: BlePacket[], connections: Record<string, unknown>[]): BlePacket[] {
+  return packets.map((packet) => {
+    if (packet.packet_kind !== "data") return packet;
+    const connection = connections.find((entry) =>
+      String(entry.access_address).toLowerCase() === packet.access_address.toLowerCase());
+    if (typeof connection?.advertiser_address !== "string" ||
+        !["random", "public"].includes(String(connection.advertiser_address_type))) return packet;
+    return {...packet, adv_address: connection.advertiser_address,
+      adv_address_type: connection.advertiser_address_type as "random" | "public"};
+  });
+}
+
+/** Full session storage is independent of the small live display window. */
+export class BleSessionCapture {
+  private readonly packets = new Map<string, BlePacket>();
+  constructor(readonly limit = 10_000) {}
+  get full() { return this.packets.size >= this.limit; }
+  clear() { this.packets.clear(); }
+  append(incoming: BlePacket[]): BlePacket[] {
+    const accepted: BlePacket[] = [];
+    for (const packet of incoming) {
+      if (!packet.crc_ok) continue;
+      const key = packetKey(packet);
+      if (this.packets.has(key)) continue;
+      if (this.full) break;
+      this.packets.set(key, packet);
+      accepted.push(packet);
+    }
+    return accepted;
+  }
+  forDevice(key: string): BlePacket[] {
+    return [...this.packets.values()].filter((packet) => deviceKey(packet) === key);
+  }
+}
+
+/** Convert tracked BLE identity to the packet-feed identity used for grouping. */
+export function bleTrackGroupKey(id: string): string | null {
+  if (id.startsWith("ble-link:")) return `link:${id.slice("ble-link:".length)}`;
+  if (id.startsWith("ble:")) return id.slice("ble:".length);
+  return null;
 }

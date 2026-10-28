@@ -12,6 +12,7 @@ export type BlePacket = {
   offset_bits: number;
   dewhitened: boolean;
   adv_address?: string | null;
+  adv_address_type?: "random" | "public";
   ad_structures?: {
     type: number;
     label: string;
@@ -20,6 +21,15 @@ export type BlePacket = {
   }[];
   summary?: string | null;
   led_remote?: boolean;
+  capture_id?: string | null;
+  phy?: string;
+  packet_kind?: "advertising" | "data";
+  sample_offset?: number | null;
+  timestamp_seconds?: number | null;
+  cfo_hz?: number | null;
+  aa_errors?: number;
+  protocol_fields?: Record<string, unknown>;
+  warnings?: string[];
 };
 
 export type BleDecodeResult = {
@@ -30,4 +40,23 @@ export type BleDecodeResult = {
   bit_count: number;
   packet_count: number;
   packets: BlePacket[];
+  warnings?: string[];
+  scope?: string;
+  truncated?: boolean;
+  connections?: Record<string, unknown>[];
+};
+
+export type SavedBleMessages = {
+  id: string;
+  name: string;
+  kind: "broadcast" | "device";
+  device_keys?: string[];
+  created_at: number;
+  message_count: number;
+  broadcast_count: number;
+  replayable_count: number;
+  broadcast_key: string | null;
+  demo: boolean;
+  packets?: BlePacket[];
+  duplicate?: boolean;
 };

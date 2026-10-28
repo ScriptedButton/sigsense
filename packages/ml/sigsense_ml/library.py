@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,35 @@ import faiss
 import numpy as np
 
 from sigsense_ml.classes import EMBEDDING_DIM, SIGNAL_CLASSES
+
+_ARTEMIS_PAGE = re.compile(r"^Artemis #(\d+)\b")
+
+
+def artemis_page_id(source: str, notes: str) -> str | None:
+    """Page id for an Artemis-DB prototype, or None when notes are not that shape.
+
+    Only a leading integer is accepted so notes cannot steer a media URL.
+    """
+    if source != "artemis":
+        return None
+    match = _ARTEMIS_PAGE.match(notes or "")
+    return match.group(1) if match else None
+
+
+def _class_entry(
+    label: str, source: str, count: int, notes: str, *, enrolled: bool
+) -> dict:
+    item = {
+        "label": label,
+        "source": source,
+        "count": count,
+        "enrolled": enrolled,
+        "notes": notes if source in {"artemis", "user"} else "",
+    }
+    page_id = artemis_page_id(source, notes)
+    if page_id:
+        item["pageId"] = page_id
+    return item
 
 
 class SignalLibrary:
@@ -98,35 +128,124 @@ class SignalLibrary:
         self.save()
         return pid
 
+    def has_note(self, source: str, notes_prefix: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM prototypes WHERE source = ? AND notes LIKE ? LIMIT 1",
+            (source, notes_prefix + "%"),
+        ).fetchone()
+        return row is not None
+
+    def remove_source(self, source: str) -> int:
+        """Delete every prototype from `source` and rebuild the index."""
+        rows = self._conn.execute(
+            "SELECT id FROM prototypes WHERE source = ?", (source,)
+        ).fetchall()
+        doomed = {int(r["id"]) for r in rows}
+        if not doomed:
+            return 0
+        keep = [i for i, pid in enumerate(self._id_map) if pid not in doomed]
+        vectors = (
+            np.vstack([self._index.reconstruct(i) for i in keep]).astype(np.float32)
+            if keep
+            else np.zeros((0, self.embedding_dim), dtype=np.float32)
+        )
+        index = faiss.IndexFlatIP(self.embedding_dim)
+        if len(vectors):
+            index.add(vectors)
+        self._index = index
+        self._id_map = [self._id_map[i] for i in keep]
+        self._conn.execute("DELETE FROM prototypes WHERE source = ?", (source,))
+        self._conn.commit()
+        self.save()
+        return len(doomed)
+
+    def source_vectors(self, source: str) -> tuple[np.ndarray, list[str]]:
+        """Unit vectors and labels of every prototype from `source`."""
+        rows = self._conn.execute(
+            "SELECT id, label FROM prototypes WHERE source = ?", (source,)
+        ).fetchall()
+        labels = {int(r["id"]): r["label"] for r in rows}
+        vectors, names = [], []
+        for i, pid in enumerate(self._id_map):
+            if pid in labels:
+                vectors.append(self._index.reconstruct(i))
+                names.append(labels[pid])
+        if not vectors:
+            return np.zeros((0, self.embedding_dim), dtype=np.float32), []
+        return np.vstack(vectors).astype(np.float32), names
+
+    def remove_notes(self, source: str, notes_prefix: str) -> int:
+        """Delete prototypes from `source` whose notes start with `notes_prefix`.
+
+        Used to retract a single user correction without disturbing the rest of
+        the library. Returns how many were removed.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM prototypes WHERE source = ? AND notes LIKE ?",
+            (source, notes_prefix + "%"),
+        ).fetchall()
+        doomed = {int(r["id"]) for r in rows}
+        if not doomed:
+            return 0
+        keep = [i for i, pid in enumerate(self._id_map) if pid not in doomed]
+        vectors = (
+            np.vstack([self._index.reconstruct(i) for i in keep]).astype(np.float32)
+            if keep
+            else np.zeros((0, self.embedding_dim), dtype=np.float32)
+        )
+        index = faiss.IndexFlatIP(self.embedding_dim)
+        if len(vectors):
+            index.add(vectors)
+        self._index = index
+        self._id_map = [self._id_map[i] for i in keep]
+        self._conn.executemany(
+            "DELETE FROM prototypes WHERE id = ?", [(pid,) for pid in doomed]
+        )
+        self._conn.commit()
+        self.save()
+        return len(doomed)
+
     def list_classes(self) -> list[dict]:
         rows = self._conn.execute(
             """
-            SELECT label, source, COUNT(*) as count
+            SELECT label, source, COUNT(*) as count, MIN(notes) as notes
             FROM prototypes
             GROUP BY label, source
             ORDER BY label
             """
         ).fetchall()
         builtin = [
-            {"label": c, "source": "builtin", "count": 0, "enrolled": False}
+            {
+                "label": c,
+                "source": "builtin",
+                "count": 0,
+                "enrolled": False,
+                "notes": "",
+            }
             for c in SIGNAL_CLASSES
         ]
         by_label = {b["label"]: b for b in builtin}
         for r in rows:
             label = r["label"]
+            notes = r["notes"] or ""
             entry = by_label.get(label)
             if entry is None:
-                by_label[label] = {
-                    "label": label,
-                    "source": r["source"],
-                    "count": r["count"],
-                    "enrolled": True,
-                }
+                by_label[label] = _class_entry(
+                    label, r["source"], r["count"], notes, enrolled=True
+                )
             else:
                 entry["count"] += r["count"]
                 entry["enrolled"] = entry["count"] > 0 or r["source"] == "user"
                 if r["source"] == "user":
                     entry["source"] = "user"
+                    if notes and not entry.get("notes"):
+                        entry["notes"] = notes
+                page_id = artemis_page_id(r["source"], notes)
+                if page_id and "pageId" not in entry:
+                    entry["pageId"] = page_id
+                    entry["notes"] = notes
+                    if entry["source"] == "builtin":
+                        entry["source"] = "artemis"
         return sorted(by_label.values(), key=lambda x: x["label"].lower())
 
     def search(

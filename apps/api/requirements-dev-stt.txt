@@ -1,0 +1,4 @@
+# Only for building the speech test corpus and scoring it (scripts/stt_corpus.py, scripts/stt_eval.py).
+kokoro-onnx>=0.4
+jiwer>=3
+soundfile>=0.12

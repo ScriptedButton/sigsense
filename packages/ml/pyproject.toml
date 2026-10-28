@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ble = ["cryptography>=43"]
 torchsig = ["torchsig>=2.2"]
 all = ["torchsig>=2.2"]
 

@@ -49,7 +49,7 @@ export function BleReplayButton({ packet, defaultChannel }: Props) {
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2">
       <label className="flex items-center gap-1 text-xs text-[var(--muted)]">
-        ch
+        Transmit channel
         <select
           className="field py-1 text-xs"
           value={channel}
@@ -69,7 +69,7 @@ export function BleReplayButton({ packet, defaultChannel }: Props) {
         onClick={() => replay(false)}
         className="border border-[var(--signal)] px-2 py-1 text-xs text-[var(--signal)] hover:bg-[var(--signal-dim)] disabled:opacity-50"
       >
-        {busy ? "…" : "Replay"}
+        {busy ? "Transmitting…" : "Transmit packet"}
       </button>
       <button
         type="button"

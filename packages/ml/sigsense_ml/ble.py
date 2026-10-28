@@ -1,4 +1,4 @@
-"""Bluetooth LE 1M PHY helpers: GFSK IQ synthesis, demod, and PDU framing.
+"""Passive Bluetooth LE 1M/2M framing plus legacy 1M test-waveform helpers.
 
 Supports advertising access address (0x8E89BED6) and optional channel whitening.
 Intended for HackRF / wideband IQ captures around 2.4 GHz.
@@ -6,7 +6,8 @@ Intended for HackRF / wideband IQ captures around 2.4 GHz.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from uuid import uuid4
 
 import numpy as np
 from scipy import signal as sp_signal
@@ -61,6 +62,16 @@ class BlePacket:
     summary: str | None = None
     led_remote: bool = False
 
+    capture_id: str | None = None
+    phy: str = "LE1M"
+    packet_kind: str = "advertising"
+    sample_offset: int | None = None
+    timestamp_seconds: float | None = None
+    cfo_hz: float | None = None
+    aa_errors: int = 0
+    protocol_fields: dict = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -76,99 +87,105 @@ def is_led_remote_advdata(adv_data: bytes) -> bool:
     return adv_data[2:4] in (b"\x55\xaa", b"\x4c\x00")
 
 
-def parse_adv_payload(pdu_type: int, payload: bytes) -> dict:
-    """Parse ADV_*/SCAN_* payload: addresses + AD structures when present."""
-    out: dict = {
+def parse_adv_payload(pdu_type: int, payload: bytes, header0: int = 0) -> dict:
+    """Decode legacy, directed, initiating and extended advertising separately."""
+    from sigsense_ml.ble_protocol import (
+        parse_ad_structures,
+        parse_connect_ind,
+        parse_extended_payload,
+    )
+
+    out = {
         "adv_address": None,
         "ad_structures": [],
         "summary": None,
         "led_remote": False,
+        "protocol_fields": {},
+        "warnings": [],
     }
-
-    # SCAN_REQ: ScanA(6) + AdvA(6)
-    if pdu_type == 0x3 and len(payload) >= 12:
-        scan_a = _mac_le(payload[:6])
-        adv_a = _mac_le(payload[6:12])
-        out["adv_address"] = adv_a
-        out["summary"] = f"ScanA {scan_a} → AdvA {adv_a}"
+    if pdu_type == 5:
+        context = parse_connect_ind(payload, header0)
+        out.update(
+            adv_address=context["advertiser_address"],
+            protocol_fields={"connection": context},
+            summary=f"CONNECT {context['initiator_address']} → {context['advertiser_address']} · {context['access_address']}",
+        )
+        if not context["valid_parameters"]:
+            out["warnings"].append(
+                "Invalid connection parameters; connection will not be tracked"
+            )
         return out
-
-    if pdu_type not in (0x0, 0x1, 0x2, 0x4, 0x6, 0x7) or len(payload) < 6:
-        out["summary"] = payload.hex() if payload else "(empty)"
+    if pdu_type in (1, 3):
+        if len(payload) != 12:
+            raise ValueError("Directed advertising/scan request requires 12 bytes")
+        first, second = _mac_le(payload[:6]), _mac_le(payload[6:12])
+        out["adv_address"] = second if pdu_type == 3 else first
+        out["protocol_fields"] = {
+            "scanner_address" if pdu_type == 3 else "target_address": (
+                first if pdu_type == 3 else second
+            )
+        }
+        out["summary"] = f"{first} → {second}"
         return out
-
-    # AdvA is little-endian on air
-    adv_address = _mac_le(payload[:6])
-    out["adv_address"] = adv_address
-    adv_data = payload[6:]
+    if pdu_type in (7, 8):
+        extended = parse_extended_payload(payload)
+        out["protocol_fields"] = {"extended": extended}
+        out["adv_address"] = extended.get("advertiser_address")
+        adv_data = bytes.fromhex(extended["adv_data_hex"])
+    elif pdu_type in (0, 2, 4, 6) and len(payload) >= 6:
+        out["adv_address"] = _mac_le(payload[:6])
+        adv_data = payload[6:]
+    else:
+        out["summary"] = payload.hex()
+        return out
+    ads, warnings = parse_ad_structures(adv_data)
+    out["ad_structures"], out["warnings"] = ads, warnings
     out["led_remote"] = is_led_remote_advdata(adv_data)
-
-    ads: list[dict] = []
-    i = 6
-    while i < len(payload):
-        length = payload[i]
-        i += 1
-        if length == 0 or i + length - 1 > len(payload):
-            break
-        ad_type = payload[i]
-        data = payload[i + 1 : i + length]
-        i += length
-        label = {
-            0x01: "Flags",
-            0x02: "Incomplete UUID16",
-            0x03: "Complete UUID16",
-            0x08: "Shortened Local Name",
-            0x09: "Complete Local Name",
-            0x0A: "Tx Power",
-            0xFF: "Manufacturer Specific",
-        }.get(ad_type, f"AD 0x{ad_type:02X}")
-        detail = data.hex()
-        if ad_type == 0x01 and data:
-            flags = data[0]
-            parts = []
-            if flags & 0x01:
-                parts.append("LE Limited Disc")
-            if flags & 0x02:
-                parts.append("LE General Disc")
-            if flags & 0x04:
-                parts.append("BR/EDR Not Supported")
-            detail = f"0x{flags:02X} ({', '.join(parts) or 'none'})"
-        elif ad_type == 0xFF:
-            detail = data.hex()
-            # Apple Continuity company ID is little-endian 0x004C → bytes 4c 00
-            if data[:2] == b"\x4c\x00" and not out["led_remote"]:
-                detail = f"{data.hex()} (Apple Continuity-like)"
-            elif out["led_remote"] and len(adv_data) > 12:
-                detail = f"{data.hex()} (AdvData[12]=0x{adv_data[12]:02x})"
-        elif ad_type in (0x08, 0x09):
-            try:
-                detail = data.decode("utf-8", errors="replace")
-            except Exception:
-                detail = data.hex()
-        ads.append({"type": ad_type, "label": label, "data_hex": data.hex(), "detail": detail})
-
-    out["ad_structures"] = ads
     if out["led_remote"]:
         cmd = f" AdvData[12]=0x{adv_data[12]:02x}" if len(adv_data) > 12 else ""
-        out["summary"] = f"{adv_address} · LED AdvData {adv_data.hex()}{cmd}"
-    elif len(payload) > 6 and ads and ads[0]["type"] == 0xFF and len(ads) == 1:
-        out["summary"] = f"{adv_address} · AdvData {adv_data.hex()}"
+        out["summary"] = f"{out['adv_address']} · LED AdvData {adv_data.hex()}{cmd}"
     else:
-        ad_summary = "; ".join(f"{a['label']}: {a['detail']}" for a in ads) or "no AD"
-        out["summary"] = f"{adv_address} · {ad_summary}"
+        summary = "; ".join(f"{a['label']}: {a['detail']}" for a in ads) or "no AD"
+        out["summary"] = f"{out['adv_address'] or 'Extended advertisement'} · {summary}"
     return out
 
 
 def dedupe_packets(packets: list[BlePacket]) -> list[BlePacket]:
-    """Keep unique PDU bodies (ignore offset duplicates from ring/overlap)."""
-    seen: set[str] = set()
-    out: list[BlePacket] = []
-    for p in packets:
-        key = f"{p.header_hex}:{p.payload_hex}:{p.crc_ok}"
-        if key in seen:
+    """Remove alternate demodulation hypotheses, preserving separate RF events."""
+    out = []
+    for packet in sorted(
+        packets,
+        key=lambda p: (
+            p.sample_offset if p.sample_offset is not None else p.offset_bits
+        ),
+    ):
+        position = (
+            packet.sample_offset
+            if packet.sample_offset is not None
+            else packet.offset_bits
+        )
+        if any(
+            p.access_address == packet.access_address
+            and p.channel == packet.channel
+            and p.phy == packet.phy
+            and p.header_hex == packet.header_hex
+            and p.payload_hex == packet.payload_hex
+            and (
+                (
+                    p.timestamp_seconds is not None
+                    and packet.timestamp_seconds is not None
+                    and abs(p.timestamp_seconds - packet.timestamp_seconds) < 2e-6
+                )
+                or (
+                    p.timestamp_seconds is None
+                    and packet.timestamp_seconds is None
+                    and abs(p.offset_bits - packet.offset_bits) <= 1
+                )
+            )
+            for p in out[-8:]
+        ):
             continue
-        seen.add(key)
-        out.append(p)
+        out.append(packet)
     return out
 
 
@@ -181,6 +198,7 @@ ADV_PDU_TYPES = {
     0x5: "CONNECT_IND",
     0x6: "ADV_SCAN_IND",
     0x7: "ADV_EXT_IND",
+    0x8: "AUX_CONNECT_RSP",
 }
 
 
@@ -210,18 +228,12 @@ def _whiten_bits(bits: np.ndarray, channel: int) -> np.ndarray:
 
 
 def crc_init_reorder(crc_init: int = CRC_INIT_ADVERTISING_INPUT) -> int:
-    """Match btle_rx.c crc_init_reorder: 0x555555 → 0xAAAAAA."""
-    crc_init_input = 0
-    tmp = int(crc_init) & 0xFFFFFF
-    for _ in range(3):
-        crc_init_input = ((crc_init_input << 8) | (tmp & 0xFF)) & 0xFFFFFF
-        tmp >>= 8
-    crc_init_input = (crc_init_input << 1) & 0x1FFFFFF
-    out = 0
-    for _ in range(24):
-        crc_init_input >>= 1
-        out = ((out << 1) | (crc_init_input & 1)) & 0xFFFFFF
-    return out
+    """Convert protocol CRCInit to the reflected 24-bit CRC register order.
+
+    Reversing each octet alone happens to work for advertising's 0x555555,
+    but fails for the arbitrary CRCInit used by connected packets.
+    """
+    return int(f"{int(crc_init) & 0xffffff:024b}"[::-1], 2)
 
 
 def _crc24_bytes(data: bytes, init: int = CRC_INIT_ADVERTISING) -> int:
@@ -259,30 +271,78 @@ def decode_unwhitened_pdu(
     pdu_crc: bytes,
     *,
     channel: int | None = None,
+    access_address: int = ADV_ACCESS_ADDRESS,
+    crc_init: int | None = None,
 ) -> BlePacket | None:
-    """Parse an unwhitened PDU+CRC fixture (header..payload..crc)."""
-    if len(pdu_crc) < 2 + 3:
+    """Parse dewhitened LL PDU+CRC; data channels require their actual CRCInit."""
+    if channel is not None and not 0 <= channel <= 39:
+        raise ValueError("BLE channel must be 0..39")
+    if len(pdu_crc) < 5:
         return None
-    header = pdu_crc[:2]
-    pdu_type = header[0] & 0x0F
-    length = header[1] & 0xFF
-    if length > 37:
-        return None
-    total = 2 + length
+    advertising = access_address == ADV_ACCESS_ADDRESS
+    if not advertising and crc_init is None:
+        raise ValueError("Data PDU decoding requires the connection CRCInit")
+    header_size = 2 if advertising else 2 + bool(pdu_crc[0] & 0x20)
+    length = pdu_crc[1]
+    if advertising:
+        kind = pdu_crc[0] & 15
+        bounds = {
+            0: (6, 37),
+            1: (12, 12),
+            2: (6, 37),
+            3: (12, 12),
+            4: (6, 37),
+            5: (34, 34),
+            6: (6, 37),
+            7: (1, 255),
+            8: (1, 255),
+        }
+        if kind not in bounds or not bounds[kind][0] <= length <= bounds[kind][1]:
+            return None
+    else:
+        kind = pdu_crc[0] & 3
+        if kind == 0:
+            return None
+    total = header_size + length
     if len(pdu_crc) < total + 3:
         return None
-    body = pdu_crc[:total]
-    crc_bytes = pdu_crc[total : total + 3]
-    ok = _crc24_bytes(body) == int.from_bytes(crc_bytes, "little")
-    payload = body[2:]
-    fields = parse_adv_payload(pdu_type, payload)
+    body, crc_bytes = pdu_crc[:total], pdu_crc[total : total + 3]
+    raw_init = CRC_INIT_ADVERTISING_INPUT if crc_init is None else crc_init
+    ok = _crc24_bytes(body, crc_init_reorder(raw_init)) == int.from_bytes(
+        crc_bytes, "little"
+    )
+    payload = body[header_size:]
+    if advertising:
+        try:
+            fields = parse_adv_payload(kind, payload, body[0])
+        except ValueError:
+            return None
+        name = ADV_PDU_TYPES[kind]
+    else:
+        fields = {
+            "adv_address": None,
+            "ad_structures": [],
+            "led_remote": False,
+            "warnings": [],
+            "protocol_fields": {
+                "llid": kind,
+                "nesn": (body[0] >> 2) & 1,
+                "sn": (body[0] >> 3) & 1,
+                "md": bool(body[0] & 16),
+                "cp": bool(body[0] & 32),
+            },
+            "summary": f"{length} payload bytes · encryption state unknown",
+        }
+        if header_size == 3:
+            fields["protocol_fields"]["cte_info"] = body[2]
+        name = "LL_CONTROL" if kind == 3 else "LL_DATA" if payload else "LL_EMPTY"
     return BlePacket(
-        access_address=f"0x{ADV_ACCESS_ADDRESS:08X}",
+        access_address=f"0x{access_address:08X}",
         channel=channel,
-        pdu_type=pdu_type,
-        pdu_type_name=ADV_PDU_TYPES.get(pdu_type, f"TYPE_{pdu_type}"),
+        pdu_type=kind,
+        pdu_type_name=name,
         length=length,
-        header_hex=header.hex(),
+        header_hex=body[:header_size].hex(),
         payload_hex=payload.hex(),
         crc_hex=crc_bytes.hex(),
         crc_ok=ok,
@@ -292,7 +352,10 @@ def decode_unwhitened_pdu(
         adv_address=fields["adv_address"],
         ad_structures=fields["ad_structures"],
         summary=fields["summary"],
-        led_remote=bool(fields.get("led_remote")),
+        led_remote=fields["led_remote"],
+        packet_kind="advertising" if advertising else "data",
+        protocol_fields=fields.get("protocol_fields", {}),
+        warnings=fields.get("warnings", []),
     )
 
 
@@ -300,13 +363,18 @@ def decode_whitened_pdu(
     whitened_pdu_crc: bytes,
     *,
     channel: int,
+    access_address: int = ADV_ACCESS_ADDRESS,
+    crc_init: int | None = None,
 ) -> BlePacket | None:
-    """Dewhiten then parse PDU+CRC (no AA/preamble)."""
+    if not 0 <= channel <= 39:
+        raise ValueError("BLE channel must be 0..39")
     bits = np.unpackbits(
         np.frombuffer(whitened_pdu_crc, dtype=np.uint8), bitorder="little"
     )
     plain = bits_to_bytes(_whiten_bits(bits, channel))[: len(whitened_pdu_crc)]
-    return decode_unwhitened_pdu(plain, channel=channel)
+    return decode_unwhitened_pdu(
+        plain, channel=channel, access_address=access_address, crc_init=crc_init
+    )
 
 
 def bits_to_bytes(bits: np.ndarray) -> bytes:
@@ -327,9 +395,7 @@ def encode_adv_pdu_crc(*, header_hex: str, payload_hex: str) -> bytes:
         raise ValueError("BLE advertising payload max is 37 bytes")
     pdu = bytes([header[0], len(payload) & 0xFF]) + payload
     crc_val = _crc24_bytes(pdu, init=CRC_INIT_ADVERTISING)
-    crc_bytes = bytes(
-        [crc_val & 0xFF, (crc_val >> 8) & 0xFF, (crc_val >> 16) & 0xFF]
-    )
+    crc_bytes = bytes([crc_val & 0xFF, (crc_val >> 8) & 0xFF, (crc_val >> 16) & 0xFF])
     return pdu + crc_bytes
 
 
@@ -363,9 +429,7 @@ def packet_bits_for_tx(
 ) -> np.ndarray:
     """Preamble + AA + whitened PDU/CRC bits for BLE 1M TX."""
     pdu_crc = encode_adv_pdu_crc(header_hex=header_hex, payload_hex=payload_hex)
-    pdu_bits = np.unpackbits(
-        np.frombuffer(pdu_crc, dtype=np.uint8), bitorder="little"
-    )
+    pdu_bits = np.unpackbits(np.frombuffer(pdu_crc, dtype=np.uint8), bitorder="little")
     whitened = _whiten_bits(pdu_bits, channel)
     # BLE 1M: preamble 0xAA when AA LSB is 0 → alternating 0,1,…
     preamble = np.tile([0, 1], 4).astype(np.uint8)
@@ -434,44 +498,35 @@ def generate_ble_adv_iq(
     )
 
     # Pad with noise floor
-    noise = (
-        rng.normal(0, 0.05, n_pad) + 1j * rng.normal(0, 0.05, n_pad)
-    ).astype(np.complex64)
+    noise = (rng.normal(0, 0.05, n_pad) + 1j * rng.normal(0, 0.05, n_pad)).astype(
+        np.complex64
+    )
     packet = np.concatenate([noise, iq, noise])
 
     # AWGN
     power = np.mean(np.abs(packet) ** 2) + 1e-12
     noise_power = power / (10 ** (snr_db / 10.0))
-    awgn = (
-        rng.normal(0, np.sqrt(noise_power / 2), packet.shape)
-        + 1j * rng.normal(0, np.sqrt(noise_power / 2), packet.shape)
+    awgn = rng.normal(0, np.sqrt(noise_power / 2), packet.shape) + 1j * rng.normal(
+        0, np.sqrt(noise_power / 2), packet.shape
     )
     return (packet + awgn).astype(np.complex64)
-
-
-def _channel_filter(iq: np.ndarray, sample_rate: float) -> np.ndarray:
-    """Band-limit to ~±700 kHz for BLE 1M."""
-    iq = np.asarray(iq, dtype=np.complex64).ravel()
-    if iq.size < 64:
-        return iq
-    cutoff = min(0.45, 700e3 / sample_rate)
-    b, a = sp_signal.butter(3, cutoff, btype="low")
-    return sp_signal.filtfilt(b, a, iq).astype(np.complex64)
 
 
 def _fm_soft(iq: np.ndarray) -> np.ndarray:
     return np.angle(iq[1:] * np.conj(iq[:-1])).astype(np.float64)
 
 
-def _soft_filtered(iq: np.ndarray, sample_rate: float) -> tuple[np.ndarray, int]:
+def _soft_filtered(
+    iq: np.ndarray, sample_rate: float, symbol_rate: float = 1e6
+) -> tuple[np.ndarray, int]:
     """FM discriminator + light LPF; returns (soft, sps)."""
     # Mild channelization — too tight smears GFSK zero-crossings
-    if sample_rate > 2.5e6:
-        cutoff = min(0.45, 1.1e6 / sample_rate)
+    if sample_rate > 2.5 * symbol_rate:
+        cutoff = min(0.45, 1.1 * symbol_rate / sample_rate)
         b, a = sp_signal.butter(2, cutoff, btype="low")
         iq = sp_signal.filtfilt(b, a, iq).astype(np.complex64)
     soft = _fm_soft(iq)
-    sps = max(2, int(round(sample_rate / 1e6)))
+    sps = max(2, int(round(sample_rate / symbol_rate)))
     b2, a2 = sp_signal.butter(2, min(0.45, 0.85 / sps))
     soft = sp_signal.filtfilt(b2, a2, soft)
     return soft, sps
@@ -487,7 +542,15 @@ def demod_gfsk_bits(
     iq = np.asarray(iq, dtype=np.complex64).ravel()
     if iq.size < 16:
         return np.zeros(0, dtype=np.uint8)
-    soft, sps = _soft_filtered(iq, sample_rate)
+    from fractions import Fraction
+
+    if symbol_rate not in (1e6, 2e6) or sample_rate < 2 * symbol_rate:
+        raise ValueError(
+            "GFSK demodulation needs LE1M/LE2M and at least two samples/symbol"
+        )
+    ratio = Fraction(4 * symbol_rate / sample_rate).limit_denominator(4096)
+    iq = sp_signal.resample_poly(iq, ratio.numerator, ratio.denominator)
+    soft, sps = _soft_filtered(iq, 4 * symbol_rate, symbol_rate)
     aa = ADV_AA_BITS.astype(np.float64) * 2.0 - 1.0
     best_bits = np.zeros(0, dtype=np.uint8)
     best_score = -1e9
@@ -504,7 +567,9 @@ def demod_gfsk_bits(
     return best_bits
 
 
-def _find_aa_offsets(bits: np.ndarray, aa_bits: np.ndarray, max_errors: int = 0) -> list[int]:
+def _find_aa_offsets(
+    bits: np.ndarray, aa_bits: np.ndarray, max_errors: int = 0
+) -> list[int]:
     n = len(aa_bits)
     if len(bits) < n + 16:
         return []
@@ -534,46 +599,31 @@ def _parse_from_bits(
     *,
     channel: int,
     access_address: int = ADV_ACCESS_ADDRESS,
+    crc_init: int | None = None,
 ) -> BlePacket | None:
     start = aa_offset + 32
     if start + 40 > len(bits):
         return None
     for dewhitened, stream in (
-        (True, _whiten_bits(bits[start:], channel)),
-        (False, bits[start:]),
+        (True, _whiten_bits(bits[start : start + 2088], channel)),
+        (False, bits[start : start + 2088]),
     ):
         header = bits_to_bytes(stream[:16])
-        pdu_type = header[0] & 0x0F
-        length = header[1] & 0xFF  # advertising Length is 8-bit (0..37)
-        if length < 6 or length > 37:
-            continue
-        total = 16 + length * 8
-        if len(stream) < total + 24:
-            continue
-        pdu_bits = stream[:total]
-        crc_bits = stream[total : total + 24]
-        if not _crc24_check(pdu_bits, crc_bits):
-            continue
-        payload = bits_to_bytes(stream[16:total])
-        fields = parse_adv_payload(pdu_type, payload)
-        return BlePacket(
-            access_address=f"0x{access_address:08X}",
-            channel=channel,
-            pdu_type=pdu_type,
-            pdu_type_name=ADV_PDU_TYPES.get(pdu_type, f"TYPE_{pdu_type}"),
-            length=length,
-            header_hex=header.hex(),
-            payload_hex=payload.hex(),
-            crc_hex=bits_to_bytes(crc_bits)[:3].hex(),
-            crc_ok=True,
-            rssi_dbfs=None,
-            offset_bits=aa_offset,
-            dewhitened=dewhitened,
-            adv_address=fields["adv_address"],
-            ad_structures=fields["ad_structures"],
-            summary=fields["summary"],
-            led_remote=bool(fields.get("led_remote")),
+        header_size = 2 + (
+            access_address != ADV_ACCESS_ADDRESS and bool(header[0] & 32)
         )
+        required = (header_size + header[1] + 3) * 8
+        if len(stream) < required:
+            continue
+        packet = decode_unwhitened_pdu(
+            bits_to_bytes(stream[:required]),
+            channel=channel,
+            access_address=access_address,
+            crc_init=crc_init,
+        )
+        if packet is not None and packet.crc_ok:
+            packet.offset_bits, packet.dewhitened = aa_offset, dewhitened
+            return packet
     return None
 
 
@@ -584,6 +634,7 @@ def frame_ble_packets(
     access_address: int = ADV_ACCESS_ADDRESS,
     max_packets: int = 32,
     max_errors: int = 1,
+    crc_init: int | None = None,
 ) -> list[BlePacket]:
     """Search bit stream for AA (+ preamble) and parse PDU + CRC."""
     ch = 37 if channel is None else channel
@@ -604,97 +655,123 @@ def frame_ble_packets(
         offsets = _find_aa_offsets(bits_try, aa_bits, max_errors=max_errors)
         for off in offsets[:max_packets]:
             parsed = _parse_from_bits(
-                bits_try, off, channel=ch, access_address=access_address
+                bits_try,
+                off,
+                channel=ch,
+                access_address=access_address,
+                crc_init=crc_init,
             )
             if parsed is not None:
                 packets.append(parsed)
     packets = dedupe_packets(packets)
-    return [p for p in packets if p.crc_ok and p.pdu_type in ADV_PDU_TYPES]
+    return [p for p in packets if p.crc_ok][:max_packets]
 
 
-def _burst_slices(iq: np.ndarray, sample_rate: float) -> list[tuple[int, int]]:
-    """Find short energy bursts likely to be BLE advertising PDUs."""
-    iq = np.asarray(iq, dtype=np.complex64).ravel()
-    if iq.size < 1024:
-        return [(0, iq.size)]
-    # ~80 us power window
-    win = max(32, int(sample_rate * 80e-6))
-    power = np.abs(iq) ** 2
-    ma = np.convolve(power, np.ones(win) / win, mode="same")
-    noise = float(np.median(ma) + 1e-12)
-    thr = max(noise * 6.0, float(np.percentile(ma, 92)))
-    active = ma > thr
-    slices: list[tuple[int, int]] = []
-    i = 0
-    n = len(active)
-    # BLE adv PDU ~200-400 us + pad
-    min_len = int(sample_rate * 120e-6)
-    max_len = int(sample_rate * 600e-6)
-    pad = int(sample_rate * 80e-6)
-    while i < n:
-        if not active[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and active[j]:
-            j += 1
-        if j - i >= min_len:
-            a = max(0, i - pad)
-            b = min(n, max(j + pad, i + min_len))
-            b = min(n, max(b, a + min_len))
-            if b - a > max_len + 2 * pad:
-                b = a + max_len + 2 * pad
-            slices.append((a, b))
-        i = j
-    if not slices:
-        # fallback: whole buffer in chunks
-        step = int(sample_rate * 0.002)
-        for a in range(0, iq.size, step):
-            slices.append((a, min(iq.size, a + step)))
-    return slices[:80]
-
-
-def _demod_burst_packets(
-    burst: np.ndarray,
+def _decode_soft_packets(
+    iq: np.ndarray,
     *,
     sample_rate: float,
+    symbol_rate: float,
     channel: int,
+    access_address: int,
+    crc_init: int | None,
+    max_packets: int,
 ) -> list[BlePacket]:
-    """CFO grid + polarity + sample-phase search on one burst."""
-    burst = np.asarray(burst, dtype=np.complex64).ravel()
-    if burst.size < 64:
-        return []
-    aa = ADV_AA_BITS.astype(np.float64) * 2.0 - 1.0
-    found: list[BlePacket] = []
+    """Fractional-rate resampling; normalized AA matching; per-packet CFO fit."""
+    from fractions import Fraction
 
-    for cfo in np.linspace(-200e3, 200e3, 9):
-        t = np.arange(burst.size) / sample_rate
-        mixed = (burst * np.exp(-1j * 2 * np.pi * cfo * t)).astype(np.complex64)
-        soft, sps = _soft_filtered(mixed, sample_rate)
-        for phase in range(sps):
-            samples = soft[phase::sps]
-            if samples.size < 48:
+    sps = 4
+    target_rate = symbol_rate * sps
+    ratio = Fraction(target_rate / sample_rate).limit_denominator(4096)
+    samples = (
+        sp_signal.resample_poly(iq, ratio.numerator, ratio.denominator)
+        if ratio.numerator != ratio.denominator
+        else iq
+    )
+    if len(samples) < 64:
+        return []
+    sos = sp_signal.butter(3, 0.9 * symbol_rate, fs=target_rate, output="sos")
+    samples = sp_signal.sosfiltfilt(sos, samples)
+    soft = np.convolve(_fm_soft(samples), np.ones(sps) / sps, mode="same")
+    reference = (
+        np.unpackbits(
+            np.frombuffer(access_address.to_bytes(4, "little"), dtype=np.uint8),
+            bitorder="little",
+        ).astype(float)
+        * 2
+        - 1
+    )
+    reference_centered = reference - reference.mean()
+    reference_power = np.dot(reference_centered, reference_centered)
+    found = []
+    for phase in range(sps):
+        symbols = soft[phase::sps]
+        if len(symbols) < 72:
+            continue
+        sums = np.convolve(symbols, np.ones(32), mode="valid")
+        powers = (
+            np.convolve(symbols * symbols, np.ones(32), mode="valid") - sums * sums / 32
+        )
+        correlation = np.correlate(symbols, reference_centered, mode="valid")
+        scores = np.abs(correlation) / np.sqrt(
+            np.maximum(powers, 1e-18) * reference_power
+        )
+        peaks = np.flatnonzero(
+            (scores >= 0.72)
+            & (scores >= np.r_[0, scores[:-1]])
+            & (scores >= np.r_[scores[1:], 0])
+        )
+        peaks = peaks[np.argsort(-scores[peaks])[: max(64, max_packets * 4)]]
+        for offset in peaks:
+            window = symbols[offset : offset + 32]
+            slope = correlation[offset] / reference_power
+            bias = window.mean() - slope * reference.mean()
+            polarity = 1 if slope >= 0 else -1
+            bits = (
+                (symbols[offset : offset + 2400] * 1.0 - bias) * polarity > 0
+            ).astype(np.uint8)
+            errors = int(np.count_nonzero(bits[:32] != (reference > 0)))
+            if errors > 2:
                 continue
-            for polarity in (1.0, -1.0):
-                corr = np.correlate(samples * polarity, aa, mode="valid")
-                if corr.size == 0:
-                    continue
-                peak = int(np.argmax(corr))
-                if corr[peak] < 6.0:
-                    continue
-                bits = (samples * polarity > 0).astype(np.uint8)
-                for delta in range(-3, 4):
-                    off = peak + delta
-                    if off < 0 or off + 40 >= len(bits):
-                        continue
-                    errs = int(np.sum(bits[off : off + 32] != ADV_AA_BITS))
-                    if errs > 2:
-                        continue
-                    pkt = _parse_from_bits(bits, off, channel=channel)
-                    if pkt is not None:
-                        found.append(pkt)
-        if found:
-            break
+            packet = _parse_from_bits(
+                bits,
+                0,
+                channel=channel,
+                access_address=access_address,
+                crc_init=crc_init,
+            )
+            if packet is None:
+                continue
+            # Resampling ratio is rational; use its actual rate for timestamping.
+            actual_rate = sample_rate * ratio.numerator / ratio.denominator
+            packet.sample_offset = round(
+                (phase + int(offset) * sps) * sample_rate / actual_rate
+            )
+            packet.timestamp_seconds = packet.sample_offset / sample_rate
+            packet.offset_bits = round(packet.timestamp_seconds * symbol_rate)
+            packet.phy = "LE2M" if symbol_rate == 2e6 else "LE1M"
+            packet.cfo_hz = float(bias * actual_rate / (2 * np.pi))
+            packet.aa_errors = errors
+            end = min(
+                len(iq),
+                packet.sample_offset
+                + round(
+                    (
+                        32
+                        + (len(bytes.fromhex(packet.header_hex)) + packet.length + 3)
+                        * 8
+                    )
+                    * sample_rate
+                    / symbol_rate
+                ),
+            )
+            power = (
+                np.mean(np.abs(iq[packet.sample_offset : end]) ** 2)
+                if end > packet.sample_offset
+                else 0
+            )
+            packet.rssi_dbfs = float(10 * np.log10(power + 1e-18))
+            found.append(packet)
     return dedupe_packets(found)
 
 
@@ -704,44 +781,136 @@ def decode_ble_iq(
     sample_rate: float,
     center_freq_hz: float | None = None,
     channel: int | None = None,
+    phy: str = "auto",
+    connections: list[dict] | None = None,
+    max_packets: int = 256,
 ) -> dict:
-    """Full BLE 1M decode path for an IQ buffer (burst-oriented)."""
-    if channel is None and center_freq_hz is not None:
-        channel = channel_from_freq_hz(center_freq_hz)
+    """Passively frame captured LE 1M/2M advertising and known-connection PDUs.
+
+    This function decodes samples already captured on one channel. It does not
+    follow RF channel hops, decode LE Coded IQ, or decrypt encrypted payloads.
+    """
+    if not np.isfinite(sample_rate) or sample_rate <= 0:
+        raise ValueError("sample_rate must be finite and positive")
+    if phy not in {"auto", "LE1M", "LE2M"}:
+        raise ValueError(
+            "IQ PHY must be auto, LE1M or LE2M; import sniffer PCAP for LE Coded"
+        )
+    if not 1 <= max_packets <= 4096:
+        raise ValueError("max_packets must be 1..4096")
+    if center_freq_hz is not None and not np.isfinite(center_freq_hz):
+        raise ValueError("center_freq_hz must be finite")
+    warnings = []
     if channel is None:
-        channel = 37
-
-    iq = np.asarray(iq, dtype=np.complex64).ravel()
-    packets: list[BlePacket] = []
-
-    # Path A: multi-phase whole-buffer demod (fast, good for demo + strong signals)
-    bits = demod_gfsk_bits(iq, sample_rate=sample_rate)
-    packets.extend(frame_ble_packets(bits, channel=channel, max_errors=1))
-    bit_count = int(bits.size)
-
-    # Path B: burst detector + CFO search when nothing found (real HackRF)
-    if not packets:
-        for a, b in _burst_slices(iq, sample_rate):
-            packets.extend(
-                _demod_burst_packets(
-                    iq[a:b], sample_rate=sample_rate, channel=channel
-                )
+        channel = (
+            channel_from_freq_hz(center_freq_hz) if center_freq_hz is not None else 37
+        )
+        if center_freq_hz is None:
+            warnings.append(
+                "No channel/frequency provided; assuming advertising channel 37"
             )
-            if len(packets) >= 16:
-                break
-
+    if channel is None or not 0 <= channel <= 39:
+        raise ValueError(
+            "Specify a BLE channel 0..39 or a matching BLE center frequency"
+        )
+    iq = np.asarray(iq, dtype=np.complex64).ravel()
+    if not np.isfinite(iq).all():
+        raise ValueError("IQ contains non-finite samples")
+    digital_offset = (
+        BLE_CHANNELS_MHZ[channel] * 1e6 - center_freq_hz
+        if center_freq_hz is not None
+        else 0
+    )
+    if abs(digital_offset) + 0.6e6 > sample_rate / 2:
+        raise ValueError("Requested BLE channel falls outside the captured bandwidth")
+    if digital_offset:
+        iq = (
+            iq * np.exp(-2j * np.pi * digital_offset * np.arange(len(iq)) / sample_rate)
+        ).astype(np.complex64)
+    rates = (
+        [1e6, 2e6]
+        if phy == "auto" and channel < 37
+        else [2e6 if phy == "LE2M" else 1e6]
+    )
+    rates = [rate for rate in rates if sample_rate >= 2 * rate]
+    if not rates:
+        raise ValueError(
+            "Capture rate must be at least twice the selected PHY symbol rate"
+        )
+    contexts = {}
+    for context in connections or []:
+        aa = (
+            int(context["access_address"], 0)
+            if isinstance(context["access_address"], str)
+            else int(context["access_address"])
+        )
+        init = (
+            int(context["crc_init"], 0)
+            if isinstance(context["crc_init"], str)
+            else int(context["crc_init"])
+        )
+        if (
+            not 0 < aa < 0xFFFFFFFF
+            or aa == ADV_ACCESS_ADDRESS
+            or not 0 <= init <= 0xFFFFFF
+        ):
+            raise ValueError("Invalid connection access address or CRCInit")
+        contexts[aa] = {**context, "access_address": f"0x{aa:08X}", "crc_init": init}
+    if len(contexts) > 32:
+        raise ValueError("At most 32 connection contexts may be supplied")
+    packets = []
+    for rate in rates:
+        packets.extend(
+            _decode_soft_packets(
+                iq,
+                sample_rate=sample_rate,
+                symbol_rate=rate,
+                channel=channel,
+                access_address=ADV_ACCESS_ADDRESS,
+                crc_init=None,
+                max_packets=max_packets,
+            )
+        )
+    for packet in packets:
+        context = packet.protocol_fields.get("connection")
+        if packet.crc_ok and context and context["valid_parameters"]:
+            aa = int(context["access_address"], 0)
+            contexts.pop(aa, None)
+            if len(contexts) >= 32:
+                contexts.pop(next(iter(contexts)))
+            contexts[aa] = context
+    if channel < 37:
+        for aa, context in contexts.items():
+            for rate in rates:
+                packets.extend(
+                    _decode_soft_packets(
+                        iq,
+                        sample_rate=sample_rate,
+                        symbol_rate=rate,
+                        channel=channel,
+                        access_address=aa,
+                        crc_init=context["crc_init"],
+                        max_packets=max_packets,
+                    )
+                )
     packets = dedupe_packets(packets)
-    power = float(np.mean(np.abs(iq) ** 2) + 1e-12)
-    rssi = 10.0 * np.log10(power)
-    for p in packets:
-        p.rssi_dbfs = rssi
-
+    truncated = len(packets) > max_packets
+    packets = packets[:max_packets]
+    capture_id = uuid4().hex
+    for packet in packets:
+        packet.capture_id = capture_id
+    phys = sorted({p.phy for p in packets})
     return {
-        "phy": "LE1M",
+        "phy": phys[0] if len(phys) == 1 else "auto" if not phys else "mixed",
         "sample_rate_hz": sample_rate,
         "center_freq_hz": center_freq_hz,
         "channel": channel,
-        "bit_count": bit_count,
+        "bit_count": int(len(iq) / sample_rate * rates[0]),
         "packet_count": len(packets),
         "packets": [p.to_dict() for p in packets],
+        "connections": list(contexts.values()),
+        "warnings": warnings,
+        "truncated": truncated,
+        "clock": "sample-relative",
+        "scope": "Captured-channel LE1M/LE2M; no automatic RF connection following or encrypted payload decryption",
     }

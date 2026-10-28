@@ -39,8 +39,11 @@ def estimate_rf_meta(
         psd = np.fft.fftshift(psd)
         power = psd / (psd.sum() + 1e-12)
         cdf = np.cumsum(power)
-        lo = freqs[np.searchsorted(cdf, 0.05)]
-        hi = freqs[np.searchsorted(cdf, 0.95)]
+        # A flat or all-zero spectrum can leave the cdf short of 0.05/0.95;
+        # searchsorted would then point one past the end.
+        last = len(freqs) - 1
+        lo = freqs[min(int(np.searchsorted(cdf, 0.05)), last)]
+        hi = freqs[min(int(np.searchsorted(cdf, 0.95)), last)]
         meta["bandwidth_hz"] = float(abs(hi - lo)) if sample_rate else float(abs(hi - lo))
         meta["relative_center_hz"] = float((lo + hi) / 2.0)
         # Duty: fraction of time energy above threshold

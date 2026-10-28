@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { IBM_Plex_Mono, Space_Grotesk, Source_Sans_3 } from "next/font/google";
 import "./globals.css";
 
@@ -21,9 +21,23 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SigSense — ML SDR Signal Analysis",
+  // "Add to Home Screen" opens full-screen, without Safari's toolbars.
+  appleWebApp: { capable: true, title: "SigSense", statusBarStyle: "black-translucent" },
+  formatDetection: { telephone: false },
+  title: "SigSense — SDR analysis and receiver",
   description:
-    "Identify SDR signals from IQ captures and waterfall images with open-set recognition.",
+    "Identify SDR signals from IQ captures and waterfall images, stream a HackRF, or tune an RTL-SDR in the browser.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  // Draw under the notch / home bar; the shell pads with env(safe-area-inset-*).
+  viewportFit: "cover",
+  // Keep the layout viewport put when the iOS keyboard opens (frequency entry).
+  interactiveWidget: "resizes-visual",
+  themeColor: "#121212",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

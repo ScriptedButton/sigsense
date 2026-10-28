@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from sigsense_api.feedback import FeedbackStore
+from sigsense_api.learning import Decision, UserLearner
 from sigsense_ml.library import SignalLibrary
 from sigsense_ml.meta import estimate_rf_meta
 from sigsense_ml.model import SignalEmbeddingNet, load_model
@@ -33,6 +35,12 @@ class AnalyzeResult:
     neighbors: list[dict]
     meta: dict
     embedding: list[float]
+    # What the track capture needs to be corrected later; not sent to clients.
+    spec: np.ndarray | None = None
+    cnn_probs: np.ndarray | None = None
+    cnn_label: str | None = None
+    # Set when the user's corrections changed this prediction.
+    learned: dict | None = None
 
 
 class InferenceEngine:
@@ -48,6 +56,93 @@ class InferenceEngine:
             self.models_dir / "library.faiss",
         )
         self.threshold = OPEN_SET_THRESHOLD
+        self._builtin: tuple[np.ndarray, list[str]] | None = None
+        self.learner = UserLearner()
+        self.feedback = FeedbackStore(self)
+
+    def embed_specs(self, specs: list[np.ndarray]) -> np.ndarray:
+        """L2-normalised embeddings for a batch of model-input spectrograms."""
+        batch = np.stack([np.asarray(s, dtype=np.float32) for s in specs])[:, None]
+        with torch.no_grad():
+            _, emb = self.model(torch.from_numpy(batch).float().to(self.device))
+        return emb.cpu().numpy()
+
+    def competitor_similarity(self, emb: np.ndarray, label: str) -> float | None:
+        """Cosine from an embedding to the nearest built-in class that is not `label`."""
+        if self._builtin is None:
+            self._builtin = self.library.source_vectors("builtin")
+        vectors, names = self._builtin
+        if not len(names):
+            return None
+        keep = np.array([n != label for n in names])
+        if not keep.any():
+            return None
+        e = np.asarray(emb, dtype=np.float32)
+        e = e / max(float(np.linalg.norm(e)), 1e-9)
+        return float((vectors[keep] @ e).max())
+
+    def decide(self, cnn_probs: np.ndarray, emb: np.ndarray) -> dict:
+        """Final label from CNN probabilities plus the user's corrections.
+
+        Used for live predictions and to re-evaluate a stored capture right
+        after a correction, so both always agree.
+        """
+        learner = self.__dict__.get("learner")  # absent on a bare/test engine
+        classes = list(self.model.classes)
+        decision = (
+            learner.apply(cnn_probs, classes, emb)
+            if learner is not None
+            else Decision(classes, cnn_probs, None)
+        )
+        order = np.argsort(decision.probs)[::-1][:5]
+        alternatives = [
+            {"label": decision.labels[int(i)], "confidence": float(decision.probs[int(i)])}
+            for i in order
+        ]
+        confidence = alternatives[0]["confidence"]
+        learned = decision.learned
+        # A confident match to the user's own examples is a known signal.
+        is_unknown = confidence < self.threshold and not (
+            learned and learned["weight"] >= 0.5
+        )
+        return {
+            "label": "unknown" if is_unknown else alternatives[0]["label"],
+            "confidence": confidence,
+            "is_unknown": is_unknown,
+            "alternatives": alternatives,
+            "learned": learned,
+        }
+
+    def class_names(self) -> list[str]:
+        return list(self.model.classes) + [
+            c for c in self.learner.custom_labels if c not in self.model.classes
+        ]
+
+    def _neighbors(self, emb: np.ndarray, count: int = 5) -> list[dict]:
+        """Library neighbours, user corrections first and wiki screenshots last.
+
+        The Artemis screenshots outnumber everything else and separate poorly in
+        this embedding (mean pairwise cosine 0.85), so left alone they crowd out
+        the neighbours that mean something. They keep at most two slots.
+        """
+        found = self.library.search(emb, top_k=max(40, count * 8))
+        bonus = {"user": 0.06, "builtin": 0.0, "artemis": -0.10}
+        ranked = sorted(
+            found,
+            key=lambda n: n["similarity"] + bonus.get(n.get("source"), 0.0),
+            reverse=True,
+        )
+        out: list[dict] = []
+        artemis = 0
+        for n in ranked:
+            if n.get("source") == "artemis":
+                if artemis >= 2:
+                    continue
+                artemis += 1
+            out.append(n)
+            if len(out) >= count:
+                break
+        return out
 
     def _predict_from_spec(
         self,
@@ -61,20 +156,17 @@ class InferenceEngine:
         with torch.no_grad():
             logits, emb = self.model(tensor)
             probs = F.softmax(logits / self.model.temperature, dim=1)[0]
-            conf, pred_idx = torch.max(probs, dim=0)
-            conf_f = float(conf.item())
-            pred_label = self.model.classes[int(pred_idx.item())]
-            topk = torch.topk(probs, k=min(5, probs.numel()))
-            alternatives = [
-                {"label": self.model.classes[int(i.item())], "confidence": float(p.item())}
-                for p, i in zip(topk.values, topk.indices)
-            ]
+            cnn_probs = probs.cpu().numpy()
             emb_np = emb[0].cpu().numpy()
 
-        neighbors = self.library.search(emb_np, top_k=5)
-        is_unknown = conf_f < self.threshold
-        label = pred_label
-        confidence = conf_f
+        cnn_label = self.model.classes[int(np.argmax(cnn_probs))]
+        decided = self.decide(cnn_probs, emb_np)
+        alternatives = decided["alternatives"]
+        learned = decided["learned"]
+        neighbors = self._neighbors(emb_np)
+        is_unknown = decided["is_unknown"]
+        label = decided["label"]
+        confidence = decided["confidence"]
 
         # Cosine similarity is not a calibrated class probability. Keep neighbors
         # as suggestions; do not use them to override the unknown decision.
@@ -96,6 +188,10 @@ class InferenceEngine:
             neighbors=neighbors,
             meta=meta,
             embedding=emb_np.tolist(),
+            spec=np.asarray(spec, dtype=np.float32),
+            cnn_probs=cnn_probs,
+            cnn_label=cnn_label,
+            learned=learned,
         )
 
     def analyze_image(self, data: bytes) -> AnalyzeResult:
