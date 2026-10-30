@@ -65,6 +65,9 @@ export function SdrApp({ onSectionChange }: SdrAppProps) {
 
   useEffect(() => {
     setSettings(loadDisplaySettings());
+    const syncDisplay = () => setSettings(loadDisplaySettings());
+    window.addEventListener("sdr-display-settings", syncDisplay);
+    return () => window.removeEventListener("sdr-display-settings", syncDisplay);
   }, []);
 
   const updateSettings = useCallback((patch: Partial<DisplaySettings>) => {
@@ -312,16 +315,31 @@ function ScopeLayout({
   settings,
   onSettingsChange,
 }: ScopeLayoutProps) {
+  const controller = useRadioController();
   // Pan/zoom lives outside React so dragging never re-renders this tree.
   const [viewportStore] = useState(() => new ViewportStore(sampleRate));
   useEffect(() => {
     viewportStore.setSampleRate(sampleRate);
   }, [viewportStore, sampleRate]);
   useEffect(() => () => viewportStore.dispose(), [viewportStore]);
+  useEffect(() => {
+    const update = () => {
+      const view = viewportStore.get();
+      controller.setSpectrumView(view.centerOffsetHz, sampleRate / view.zoom);
+    };
+    update();
+    const unsubscribe = viewportStore.subscribe(update);
+    return () => { unsubscribe(); controller.setSpectrumView(0, Infinity); };
+  }, [controller, viewportStore, sampleRate]);
 
   const resetZoom = useCallback(() => {
     viewportStore.jump(DEFAULT_VIEWPORT);
   }, [viewportStore]);
+
+  const applyHfView = useCallback(() => {
+    onSettingsChange({ dbRange: "auto", waterfallPalette: "ocean", waterfallSpeed: "slow", noiseFilter: "off", freqFormat: "khz", waterfallFloorOffsetDb: -2, waterfallRangeDb: 32 });
+    viewportStore.jump({ zoom: Math.max(1, Math.min(48, sampleRate / 100_000)), centerOffsetHz: offsetHz });
+  }, [onSettingsChange, viewportStore, sampleRate, offsetHz]);
 
   const [displayOpen, setDisplayOpen] = useState(false);
   const waterfallControls = (
@@ -330,11 +348,15 @@ function ScopeLayout({
       speed={settings.waterfallSpeed}
       direction={settings.waterfallDirection}
       dbRange={settings.dbRange}
+      floorOffsetDb={settings.waterfallFloorOffsetDb}
+      rangeDb={settings.waterfallRangeDb}
       noiseFilter={settings.noiseFilter}
       onPaletteChange={(waterfallPalette) => onSettingsChange({ waterfallPalette })}
       onSpeedChange={(waterfallSpeed) => onSettingsChange({ waterfallSpeed })}
       onDirectionChange={(waterfallDirection) => onSettingsChange({ waterfallDirection })}
       onDbRangeChange={(dbRange) => onSettingsChange({ dbRange })}
+      onFloorOffsetChange={(waterfallFloorOffsetDb) => onSettingsChange({ waterfallFloorOffsetDb })}
+      onRangeChange={(waterfallRangeDb) => onSettingsChange({ waterfallRangeDb })}
       onNoiseFilterChange={(noiseFilter) => onSettingsChange({ noiseFilter })}
     />
   );
@@ -361,6 +383,8 @@ function ScopeLayout({
             onCenterOnOffset={onCenterOnOffset}
             onPanLo={onPanLo}
             dbRange={settings.dbRange}
+            floorOffsetDb={settings.waterfallFloorOffsetDb}
+            rangeDb={settings.waterfallRangeDb}
             noiseFilter={settings.noiseFilter}
             markers={markers}
             onMarkerCorrect={onMarkerCorrect}
@@ -376,6 +400,14 @@ function ScopeLayout({
 
       <div className="sdr-waterfall-chrome">
         <h2 className="text-sm font-medium text-ink">Waterfall</h2>
+        <button
+            type="button"
+            className="hf-view-btn mode-chip"
+            title="Reveal weak HF signals with automatic contrast, averaging, and a 100 kHz view"
+            onClick={applyHfView}
+          >
+            HF view
+          </button>
         {live && (
           <button
             type="button"
@@ -389,6 +421,10 @@ function ScopeLayout({
         {live && displayOpen && (
           <Sheet title="Display settings" onClose={() => setDisplayOpen(false)}>
             <div className="display-settings-sheet">
+              <button type="button" className="btn-secondary" onClick={applyHfView}>
+                HF view
+              </button>
+              <p className="text-xs text-muted">Automatic contrast, averaging, and a 100 kHz view for weak signals.</p>
               <div role="group" aria-label="Signal labels on the scope" className="display-settings-markers">
                 <span className="text-sm text-muted">Signal labels</span>
                 <div className="flex gap-2">
@@ -430,6 +466,8 @@ function ScopeLayout({
             speed={settings.waterfallSpeed}
             direction={settings.waterfallDirection}
             dbRange={settings.dbRange}
+            floorOffsetDb={settings.waterfallFloorOffsetDb}
+            rangeDb={settings.waterfallRangeDb}
             noiseFilter={settings.noiseFilter}
           />
         ) : (

@@ -24,7 +24,7 @@ export type WaterfallPaletteId =
 
 export type WaterfallSpeedId = "slow" | "normal" | "fast";
 export type WaterfallDirectionId = "top" | "bottom";
-export type DbRangeId = "wide" | "normal" | "tight";
+export type DbRangeId = "auto" | "wide" | "normal" | "tight";
 export type FreqTargetId = "tune" | "center";
 export type FreqFormatId = "auto" | "mhz" | "khz" | "hz";
 
@@ -33,6 +33,8 @@ export type DisplaySettings = {
   waterfallSpeed: WaterfallSpeedId;
   waterfallDirection: WaterfallDirectionId;
   dbRange: DbRangeId;
+  waterfallFloorOffsetDb: number;
+  waterfallRangeDb: number;
   noiseFilter: NoiseFilterId;
   freqTarget: FreqTargetId;
   freqFormat: FreqFormatId;
@@ -44,7 +46,9 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   waterfallPalette: "cubehelix",
   waterfallSpeed: "normal",
   waterfallDirection: "top",
-  dbRange: "normal",
+  dbRange: "auto",
+  waterfallFloorOffsetDb: -2,
+  waterfallRangeDb: 32,
   noiseFilter: "off",
   freqTarget: "tune",
   freqFormat: "auto",
@@ -77,6 +81,7 @@ export const DB_RANGE_OPTIONS: {
   minDb: number;
   maxDb: number;
 }[] = [
+  { id: "auto", label: "Auto · weak signals", minDb: MIN_DB, maxDb: MAX_DB },
   { id: "wide", label: "Wide", minDb: -100, maxDb: -10 },
   { id: "normal", label: "Normal", minDb: MIN_DB, maxDb: MAX_DB },
   { id: "tight", label: "Tight", minDb: -70, maxDb: -25 },
@@ -150,7 +155,7 @@ export function getWaterfallPalette(id: WaterfallPaletteId | string): Rgb[] {
 }
 
 export function dbRangeFor(id: DbRangeId): { minDb: number; maxDb: number } {
-  const option = DB_RANGE_OPTIONS.find((o) => o.id === id) ?? DB_RANGE_OPTIONS[1];
+  const option = DB_RANGE_OPTIONS.find((o) => o.id === id) ?? DB_RANGE_OPTIONS.find((o) => o.id === "normal")!;
   return { minDb: option.minDb, maxDb: option.maxDb };
 }
 
@@ -175,6 +180,11 @@ export function loadDisplaySettings(): DisplaySettings {
     if (!raw) return DEFAULT_DISPLAY_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<DisplaySettings>;
     const next = { ...DEFAULT_DISPLAY_SETTINGS, ...parsed };
+    next.waterfallFloorOffsetDb = Number.isFinite(next.waterfallFloorOffsetDb) ? clamp(next.waterfallFloorOffsetDb, -12, 12) : -2;
+    next.waterfallRangeDb = Number.isFinite(next.waterfallRangeDb) ? clamp(next.waterfallRangeDb, 16, 60) : 32;
+    if (!DB_RANGE_OPTIONS.some((o) => o.id === next.dbRange)) {
+      next.dbRange = DEFAULT_DISPLAY_SETTINGS.dbRange;
+    }
     if (!isNoiseFilterId(next.noiseFilter)) {
       next.noiseFilter = DEFAULT_DISPLAY_SETTINGS.noiseFilter;
     }

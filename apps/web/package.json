@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "rtl-server": "tsx server/rtl-bridge/index.ts",
+    "autofinder-service": "tsx server/autofinder-service/main.ts",
+    "test:autofinder-service": "tsx --test server/autofinder-service/*.test.ts",
     "train:signal-id": "tsx scripts/signal-id/train.ts",
     "fetch:signal-catalog": "tsx scripts/signal-id/fetch-catalog.ts",
     "fetch:artemis": "tsx scripts/signal-id/fetch-artemis.ts",
@@ -16,13 +18,17 @@
   "dependencies": {
     "@e04/ft8ts": "^0.0.14",
     "@huggingface/transformers": "^4.2.0",
+    "@jitsi/rnnoise-wasm": "0.2.1",
     "@jtarrio/signals": "^0.10.1",
     "@jtarrio/webrtlsdr": "^3.0.6",
+    "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "three": "^0.185.1",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zod": "^4"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
@@ -36,7 +42,7 @@
     "eslint-config-next": "16.4.2",
     "tailwindcss": "^4",
     "tsx": "^4.23.8",
-    "typescript": "^5"
+    "typescript": "^5.9.3"
   },
   "packageManager": "pnpm@11.20.0"
 }

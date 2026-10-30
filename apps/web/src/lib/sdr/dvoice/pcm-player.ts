@@ -7,6 +7,7 @@
  * iOS Safari only lets an AudioContext start from a user gesture, so call
  * `unlock()` from a tap handler (the "Listen" button).
  */
+import { AudioEnhancer } from "../audio-enhancement";
 import type { DvAudioFrame } from "./types";
 
 /** Head-room kept ahead of playback after (re)starting, in seconds. */
@@ -42,6 +43,7 @@ export function int16ToFloat(pcm: Int16Array): Float32Array {
 }
 
 export class PcmPlayer {
+  private enhancer = new AudioEnhancer();
   private ctx: AudioContext | null = null;
   private gain: GainNode | null = null;
   private nextTime = 0;
@@ -125,7 +127,7 @@ export class PcmPlayer {
         this.droppedFrames += 1;
       } else {
         const buffer = ctx.createBuffer(1, frame.pcm.length, frame.sampleRate);
-        buffer.copyToChannel(int16ToFloat(frame.pcm) as Float32Array<ArrayBuffer>, 0);
+        buffer.copyToChannel(this.enhancer.process(int16ToFloat(frame.pcm), frame.sampleRate) as Float32Array<ArrayBuffer>, 0);
         const source = ctx.createBufferSource();
         source.buffer = buffer;
         source.connect(gain);
@@ -133,6 +135,7 @@ export class PcmPlayer {
       }
     }
     if (frame.endOfCall) {
+      this.enhancer.reset();
       this.lockedCall = null;
       this.nextTime = 0;
     }
@@ -140,11 +143,13 @@ export class PcmPlayer {
 
   /** Forget the queue, e.g. after a reconnect. */
   reset(): void {
+    this.enhancer.reset();
     this.lockedCall = null;
     this.nextTime = 0;
   }
 
   dispose(): void {
+    this.enhancer.reset();
     void this.ctx?.close();
     this.ctx = null;
     this.gain = null;

@@ -19,6 +19,8 @@ const META_INTERVAL_MS = 500;
 export type TranscribeOptions = {
   language: string; // "auto" or an ISO code
   prompt: string; // extra vocabulary hints
+  /** Translation is routed to multilingual Whisper in the browser. */
+  task?: "transcribe" | "translate";
 };
 
 export type TranscribeMeta = {

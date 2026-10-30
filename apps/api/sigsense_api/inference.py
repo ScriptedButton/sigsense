@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from sigsense_api.feedback import FeedbackStore
 from sigsense_api.learning import Decision, UserLearner
+from sigsense_api.live_classifier import LiveFamilyClassifier
 from sigsense_ml.library import SignalLibrary
 from sigsense_ml.meta import estimate_rf_meta
 from sigsense_ml.model import SignalEmbeddingNet, load_model
@@ -59,6 +60,8 @@ class InferenceEngine:
         self._builtin: tuple[np.ndarray, list[str]] | None = None
         self.learner = UserLearner()
         self.feedback = FeedbackStore(self)
+        family_weights = self.models_dir / "live_families.json"
+        self.live_families = LiveFamilyClassifier(family_weights) if family_weights.is_file() else None
 
     def embed_specs(self, specs: list[np.ndarray]) -> np.ndarray:
         """L2-normalised embeddings for a batch of model-input spectrograms."""
@@ -114,9 +117,8 @@ class InferenceEngine:
         }
 
     def class_names(self) -> list[str]:
-        return list(self.model.classes) + [
-            c for c in self.learner.custom_labels if c not in self.model.classes
-        ]
+        families = self.live_families.classes if self.live_families is not None else []
+        return list(dict.fromkeys([*self.model.classes, *families, *self.learner.custom_labels]))
 
     def _neighbors(self, emb: np.ndarray, count: int = 5) -> list[dict]:
         """Library neighbours, user corrections first and wiki screenshots last.

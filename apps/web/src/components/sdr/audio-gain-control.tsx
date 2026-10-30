@@ -1,5 +1,6 @@
 "use client";
 
+import type { AudioNoiseReduction } from "@/lib/sdr/audio-enhancement";
 import { useHackrf } from "@/components/HackrfPanel";
 import { useRadioController, useSdrState } from "@/components/sdr/sdr-provider";
 
@@ -28,6 +29,24 @@ export function AudioGainControl() {
           onChange={(e) => controller.setVolume(Number(e.target.value) / 100)}
         />
       </label>
+
+      <label className="mt-3 block text-xs text-muted">
+        Audio noise reduction
+        <select className="input-sm mt-1 w-full" aria-label="Audio noise reduction" value={state.audioNoiseReduction} onChange={(e) => controller.setAudioNoiseReduction(e.target.value as AudioNoiseReduction)}>
+          <option value="off">Off</option>
+          <option value="low">Low · gentle</option>
+          <option value="medium">Medium</option>
+          <option value="high">High · strongest</option>
+        </select>
+      </label>
+      <label className="mt-3 flex items-center gap-2 text-sm text-ink">
+        <input type="checkbox" checked={state.voiceIsolation} onChange={(e) => void controller.setVoiceIsolation(e.target.checked)} />
+        Voice isolation
+      </label>
+      <p className="mt-1 text-[0.7rem] leading-snug text-muted">
+        {state.voiceIsolationLoading ? "Loading local voice model…" : "Playback only. Use isolation for speech; turn it off for CW, music, or data."}
+      </p>
+      {state.audioEnhancementError && <p role="alert" className="mt-1 text-xs text-danger">{state.audioEnhancementError}</p>}
 
       {stages ? (
         <>
@@ -86,7 +105,7 @@ export function AudioGainControl() {
       </label>
 
       <label className="mt-2 block text-xs text-muted">
-        Gain · {state.autoGain ? "AGC" : `${state.gainDb} dB`}
+        Gain · {state.autoGain ? (state.connection === "rtltcp" && state.frequencyHz < 30_000_000 ? `Auto · ${state.gainDb} dB` : "AGC") : `${state.gainDb} dB`}
         <input
           type="range"
           className="slider mt-1"
@@ -98,6 +117,13 @@ export function AudioGainControl() {
           onChange={(e) => void controller.setGain(Number(e.target.value))}
         />
       </label>
+
+      {state.connection === "rtltcp" && state.rfClipFraction !== undefined && (
+        <p className={`mt-1 text-xs ${state.rfClipFraction > 0.001 ? "text-danger" : "text-muted"}`} role="status">
+          ADC clipping · {(state.rfClipFraction * 100).toFixed(2)}%
+          {state.rfClipFraction > 0.001 ? " · Lower RF gain; the input is distorting." : " · Input within range"}
+        </p>
+      )}
 
         </>
       )}

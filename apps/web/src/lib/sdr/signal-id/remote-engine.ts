@@ -11,8 +11,8 @@ const MIN_ROWS = 8;
 const ROW_INTERVAL_MS = 60;
 /** Spacing between requests. */
 const POST_INTERVAL_MS = 900;
-/** The backend CNN input is resized anyway; wider rows are pooled down. */
-const MAX_BINS = 2048;
+/** Preserve narrow emitters up to the backend payload limit. */
+const MAX_BINS = 16384;
 /** After this many failed requests in a row the backend counts as unreachable. */
 const FAILURES_BEFORE_UNREACHABLE = 2;
 /** While unreachable, retry this often. */
@@ -79,6 +79,9 @@ export class RemoteSignalIdEngine implements SignalIdSource {
   private centerHz = 0;
   private sampleRate = 0;
   private bins = 0;
+  private iqMode = false;
+  private iq = new Int16Array(65536 * 2);
+  private iqCount = 0;
 
   constructor(private readonly onHealth: (health: RemoteHealth) => void) {}
 
@@ -120,11 +123,13 @@ export class RemoteSignalIdEngine implements SignalIdSource {
     sampleRate: number,
     fallbackCenterHz: number,
   ): void {
+    if (this.iqMode) return;
     const center = centerHz ?? fallbackCenterHz;
     if (Math.abs(center - this.centerHz) > 1 || sampleRate !== this.sampleRate) {
       this.clear();
       this.centerHz = center;
       this.sampleRate = sampleRate;
+      this.patch({ signals: [] });
     }
     const now = Date.now();
     if (now - this.lastRowAt >= ROW_INTERVAL_MS) {
@@ -144,23 +149,73 @@ export class RemoteSignalIdEngine implements SignalIdSource {
     void this.post(now);
   }
 
+  setIqMode(enabled: boolean): void {
+    if (enabled === this.iqMode) return;
+    this.iqMode = enabled;
+    this.reset();
+  }
+
+  /** Called before display averaging, with consecutive receiver IQ samples. */
+  pushIq(I: Float32Array, Q: Float32Array, centerHz: number, sampleRate: number): void {
+    if (!this.iqMode || !this.state.enabled) return;
+    if (Math.abs(centerHz - this.centerHz) > 1 || sampleRate !== this.sampleRate) {
+      this.clear();
+      this.centerHz = centerHz;
+      this.sampleRate = sampleRate;
+      this.patch({ signals: [] });
+    }
+    const now = Date.now();
+    const spacing = this.unreachable ? PROBE_INTERVAL_MS : POST_INTERVAL_MS;
+    if (this.inFlight || now - this.lastPostAt < spacing) return;
+    const count = Math.min(I.length, Q.length, this.iq.length / 2 - this.iqCount);
+    for (let i = 0; i < count; i++) {
+      this.iq[(this.iqCount + i) * 2] = Math.round(Math.max(-1, Math.min(1, I[i])) * 32767);
+      this.iq[(this.iqCount + i) * 2 + 1] = Math.round(Math.max(-1, Math.min(1, Q[i])) * 32767);
+    }
+    this.iqCount += count;
+    if (this.iqCount < this.iq.length / 2) return;
+    this.lastPostAt = now;
+    this.iqCount = 0;
+    void this.send("/analyze/iq-bands", {
+      session: this.session,
+      center_freq_hz: this.centerHz,
+      sample_rate_hz: this.sampleRate,
+      data: toBase64(new Uint8Array(this.iq.buffer)),
+      sensitivity_db: SENSITIVITY_DB[this.sensitivity],
+    }, now, this.epoch);
+  }
+
   /** Raw FFT order to ascending frequency, pooled to at most MAX_BINS. */
   private storeRow(raw: Float32Array): void {
     const n = raw.length & ~1;
     if (n < 16) return;
     const half = n >> 1;
-    const pool = Math.max(1, Math.ceil(n / MAX_BINS));
-    const out = new Float32Array(Math.floor(n / pool));
+    const out = new Float32Array(Math.min(n, MAX_BINS));
     for (let i = 0; i < out.length; i++) {
-      let sum = 0;
-      for (let k = 0; k < pool; k++) {
-        const v = raw[(i * pool + k + half) % n];
-        sum += Number.isFinite(v) ? v : -200;
+      // Cover the entire span, including a partial final group. Average power,
+      // not dB: averaging logarithms buries a narrow signal among quiet bins.
+      const start = Math.floor(i * n / out.length);
+      const end = Math.floor((i + 1) * n / out.length);
+      if (end - start === 1) {
+        const v = raw[(start + half) % n];
+        out[i] = Number.isFinite(v) ? v : -200;
+        continue;
       }
-      out[i] = sum / pool;
+      let peak = -200;
+      for (let k = start; k < end; k++) {
+        const v = raw[(k + half) % n];
+        if (Number.isFinite(v)) peak = Math.max(peak, v);
+      }
+      let power = 0;
+      for (let k = start; k < end; k++) {
+        const v = raw[(k + half) % n];
+        power += 10 ** (((Number.isFinite(v) ? v : -200) - peak) / 10);
+      }
+      out[i] = peak + 10 * Math.log10(power / (end - start));
     }
     if (this.bins !== out.length) {
-      this.rows = [];
+      this.clear();
+      this.patch({ signals: [] });
       this.bins = out.length;
     }
     this.rows.push(out);
@@ -192,22 +247,23 @@ export class RemoteSignalIdEngine implements SignalIdSource {
       }
     });
 
+    await this.send("/analyze/spectrum-bands", {
+      session: this.session,
+      center_freq_hz: this.centerHz,
+      sample_rate_hz: this.sampleRate,
+      rows: rows.length,
+      bins,
+      db_min: dbMin,
+      db_max: dbMax,
+      data: toBase64(bytes),
+      sensitivity_db: SENSITIVITY_DB[this.sensitivity],
+    }, now, epoch);
+  }
+
+  private async send(path: string, payload: object, now: number, epoch: number): Promise<void> {
     this.inFlight = true;
     try {
-      const response = await signalRequest<SpectrumBandsResponse>(
-        "/analyze/spectrum-bands",
-        {
-          session: this.session,
-          center_freq_hz: this.centerHz,
-          sample_rate_hz: this.sampleRate,
-          rows: rows.length,
-          bins,
-          db_min: dbMin,
-          db_max: dbMax,
-          data: toBase64(bytes),
-          sensitivity_db: SENSITIVITY_DB[this.sensitivity],
-        },
-      );
+      const response = await signalRequest<SpectrumBandsResponse>(path, payload);
       if (epoch !== this.epoch) return; // retuned while in flight
       this.markReachable();
       if (response.busy) return;
@@ -223,7 +279,7 @@ export class RemoteSignalIdEngine implements SignalIdSource {
         this.onHealth("unreachable");
       }
     } finally {
-      this.inFlight = false;
+      if (epoch === this.epoch) this.inFlight = false;
     }
   }
 
@@ -265,8 +321,10 @@ export class RemoteSignalIdEngine implements SignalIdSource {
 
   private clear(): void {
     this.rows = [];
+    this.iqCount = 0;
     this.bins = 0;
     this.lastPostAt = 0;
+    this.lastRowAt = 0;
     this.epoch++;
     this.inFlight = false;
     // A new session so the previous tuning's tracks are not carried over.

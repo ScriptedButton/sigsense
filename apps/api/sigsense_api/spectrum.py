@@ -325,6 +325,7 @@ class SignalTracker:
                     # (A track the user has corrected always takes its own signal.)
                     incompatible = (
                         not old.get("pinned_label")
+                        and now - old["last_seen"] > 2.5
                         and old["confidence"] > 0.7
                         and observation["confidence"] > 0.7
                         and old["label"] != observation["label"]
@@ -542,9 +543,22 @@ def observe_frame(frame, engine, tracker):
             sample_rate=narrow_rate,
             center_freq=band["center_freq_hz"],
         )
+        families = getattr(engine, "live_families", None)
+        evidence = "CNN on isolated band"
+        if families is not None:
+            fft = min(4096, len(iq))
+            window = np.hanning(fft)
+            blocks = iq[:len(iq) // fft * fft].reshape(-1, fft)
+            power = np.abs(np.fft.fftshift(np.fft.fft(blocks * window, axis=1), axes=1)) ** 2 / window.sum() ** 2
+            rows = 10 * np.log10(power + 1e-20)
+            bin_hz = rate / fft
+            lo = max(0, int(np.floor((band["low_hz"] - center) / bin_hz + fft / 2)))
+            hi = min(fft - 1, int(np.ceil((band["high_hz"] - center) / bin_hz + fft / 2)))
+            prediction = families.refine(prediction, rows, lo, hi, bin_hz)
+            evidence = "RF family model on raw IQ"
         active.append(
             tracker.observe(
-                band_observation(band, prediction, frame_id=frame["frame_id"])
+                band_observation(band, prediction, frame_id=frame["frame_id"], evidence=evidence)
             )
         )
     return active

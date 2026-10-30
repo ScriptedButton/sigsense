@@ -1,0 +1,10 @@
+# Standalone LAN worker only; no SDR, FAISS, browser or API ML dependencies.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+numpy>=1.26
+websockets>=15
+httpx>=0.27
+# Install torch for the remote machine's GPU using https://pytorch.org/get-started/locally/
+# Then: pip install --no-deps denoiser==0.1.5
+# --no-deps intentionally omits Denoiser's obsolete training/audio-device extras.
+# Its inference modules need only torch and numpy. Upstream license: CC-BY-NC-4.0.

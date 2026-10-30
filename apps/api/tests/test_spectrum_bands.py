@@ -73,6 +73,34 @@ class SpectrumBandsTests(unittest.TestCase):
             )
             self.assertEqual(bands, [], f"seed {seed}")
 
+    def test_short_push_to_talk_burst_is_not_lost_in_history(self):
+        for start in (0, 22, 45):
+            rows = noise_rows(48)
+            rows[start:start + 3] = add_ridge(
+                rows[start:start + 3], 462_562_500.0
+            )
+            bands, _, _ = find_spectrum_bands(rows, CENTER, RATE)
+            self.assertEqual(len(bands), 1, f"burst at row {start}")
+            self.assertLess(abs(bands[0]["center_freq_hz"] - 462_562_500), 5000)
+
+    def test_short_window_detection_rejects_noise_at_high_sensitivity(self):
+        for seed in range(20):
+            bands, _, _ = find_spectrum_bands(
+                noise_rows(48, seed=seed), CENTER, RATE, sensitivity_db=6
+            )
+            self.assertEqual(bands, [], f"seed {seed}")
+
+    def test_short_window_detection_rejects_unsmoothed_fft_noise(self):
+        # Periodogram noise has much larger variance than the smoothed display
+        # noise above. A maximum of individual rows would create false bands.
+        for seed in range(10):
+            rng = np.random.default_rng(seed)
+            rows = (-80 + 10 * np.log10(rng.exponential(size=(48, 8192)))).astype(np.float32)
+            bands, _, _ = find_spectrum_bands(
+                rows, CENTER, 2_048_000, sensitivity_db=6
+            )
+            self.assertEqual(bands, [], f"seed {seed}")
+
     def test_gmrs_ridge_found_and_tagged(self):
         rows = add_ridge(noise_rows(), 462_562_500.0)
         entry = SpectrumSessions().get("t")
@@ -84,13 +112,15 @@ class SpectrumBandsTests(unittest.TestCase):
         track = next(t for t in result["tracks"] if t["id"] in result["active_ids"])
         self.assertEqual(track["band_plan"]["service"], "GMRS")
         self.assertEqual(track["band_plan"]["channel"], 1)
-        self.assertEqual(track["evidence"].split(" · ")[0], "CNN on spectrum rows")
+        self.assertEqual(track["evidence"].split(" · ")[0], "RF family model on spectrum rows")
         self.assertIn("label", track)  # CNN label is reported as-is, never overwritten
         self.assertEqual(result["bins"], BINS)
 
-    def test_row_path_keeps_cnn_fidelity_on_synthetic_nfm(self):
+    def test_row_path_keeps_cnn_fidelity_when_family_model_is_unavailable(self):
         """Tight band crops collapsed labels to 0/8; full-span masking keeps most."""
         from sigsense_ml.synthetic import generate_iq
+
+        from unittest.mock import patch
 
         fft, hits = 256, 0
         for seed in range(8):
@@ -100,7 +130,8 @@ class SpectrumBandsTests(unittest.TestCase):
             power = np.abs(np.fft.fftshift(np.fft.fft(blocks * w, axis=1), axes=1)) ** 2
             rows = (10 * np.log10(power / w.sum() ** 2 + 1e-16)).astype(np.float32)
             entry = SpectrumSessions().get(f"nfm{seed}")
-            result = analyze_spectrum_rows(self.engine, entry, rows, 100e6, 1.024e6)
+            with patch.object(self.engine, "live_families", None):
+                result = analyze_spectrum_rows(self.engine, entry, rows, 100e6, 1.024e6)
             if result["tracks"] and result["tracks"][0]["label"] == "NFM":
                 hits += 1
         self.assertGreaterEqual(hits, 4, f"only {hits}/8 NFM bursts identified")

@@ -1,0 +1,75 @@
+{
+  "scope": "synthetic IQ scenes; separate emitter seed; identical inputs, family-level comparison; misses/rejections count as wrong",
+  "seed": 3731,
+  "per_class": [
+    {
+      "class": "AM",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 9,
+      "live_accepted": 9,
+      "live_accepted_correct": 9
+    },
+    {
+      "class": "NFM",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 11,
+      "live_accepted": 11,
+      "live_accepted_correct": 11
+    },
+    {
+      "class": "WFM",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 9,
+      "live_accepted": 9,
+      "live_accepted_correct": 9
+    },
+    {
+      "class": "SSB",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 11,
+      "live_accepted": 11,
+      "live_accepted_correct": 11
+    },
+    {
+      "class": "FSK",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 9,
+      "live_accepted": 9,
+      "live_accepted_correct": 9
+    },
+    {
+      "class": "Digital",
+      "count": 12,
+      "cnn_correct": 6,
+      "live_correct": 12,
+      "live_accepted": 12,
+      "live_accepted_correct": 12
+    },
+    {
+      "class": "Carrier",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 10,
+      "live_accepted": 11,
+      "live_accepted_correct": 10
+    },
+    {
+      "class": "Noise",
+      "count": 12,
+      "cnn_correct": 0,
+      "live_correct": 9,
+      "live_accepted": 11,
+      "live_accepted_correct": 9
+    }
+  ],
+  "cnn_correct": 6,
+  "live_correct": 80,
+  "live_accepted": 83,
+  "live_accepted_correct": 80,
+  "count": 96
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=SigSense RTL-SDR WebSocket bridge
+After=network.target sigsense-rtl.service
+Wants=sigsense-rtl.service
+
+[Service]
+User=cole
+WorkingDirectory=/home/cole/sigsense
+Environment=PATH=/home/cole/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/cole/.local/bin/pnpm rtl-server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

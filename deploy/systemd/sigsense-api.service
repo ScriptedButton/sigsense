@@ -1,0 +1,18 @@
+[Unit]
+Description=SigSense API
+After=network.target
+
+[Service]
+User=cole
+WorkingDirectory=/home/cole/sigsense
+Environment=PYTHONPATH=/home/cole/sigsense/apps/api:/home/cole/sigsense/packages/ml
+Environment=OMP_NUM_THREADS=1
+Environment=KMP_DUPLICATE_LIB_OK=TRUE
+Environment=SIGSENSE_CLEANER_NODE=/home/cole/.local/bin/node
+EnvironmentFile=-/etc/sigsense/processing-client.env
+ExecStart=/home/cole/sigsense/.venv/bin/uvicorn sigsense_api.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

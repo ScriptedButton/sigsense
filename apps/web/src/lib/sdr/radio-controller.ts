@@ -5,7 +5,7 @@ import {
   modeParameters,
 } from "@jtarrio/signals/demod/modes.js";
 import type { SampleCounter } from "@jtarrio/signals/demod/sample-counter.js";
-import type { Spectrum } from "@jtarrio/signals/demod/spectrum.js";
+import type { StreamingSpectrum as Spectrum, SpectrumFrameInfo } from "./streaming-spectrum";
 import type { Radio, RtlProvider } from "@jtarrio/webrtlsdr/radio.js";
 
 import { clamp } from "./format";
@@ -62,6 +62,9 @@ import type {
   P25State,
 } from "./p25/types";
 import { ScannerEngine } from "./scanner/engine";
+import { AutonomousFinder, type FinderState, type SpeechAssessment } from "./autofinder/engine";
+import { FinderCleaner } from "./autofinder/cleaner";
+import type { ReceiverSpectrum } from "./receiver-control/protocol";
 import type {
   ScanChannel,
   ScannerConfig,
@@ -87,7 +90,9 @@ import {
   SQUELCH_MIN_DB,
   SquelchGate,
 } from "./squelch";
+import { AudioEnhancer, loadVoiceIsolation, restoreAudioEnhancementSettings, setAudioEnhancementSettings, type AudioNoiseReduction } from "./audio-enhancement";
 import { TappingPlayer } from "./tapping-player";
+import { captureAudioStream, captureIqStream, type PcmListener, type IqListener } from "./receiver-control/capture";
 import {
   type TranscriptionListener,
   type TranscriptionState,
@@ -106,6 +111,7 @@ import {
 export type SpectrumListener = (
   spectrum: Float32Array,
   centerHz: number | undefined,
+  info?: SpectrumFrameInfo,
 ) => void;
 
 export type StateListener = (state: SdrState) => void;
@@ -183,6 +189,30 @@ export class RadioController {
   private readonly p25 = new P25DecoderEngine();
   private readonly p25Iq = new P25IqReceiver();
   private readonly scanner = new ScannerEngine();
+  private finder: AutonomousFinder | null = null;
+  private finderSpectrum: ReceiverSpectrum | null = null;
+  private finderUntap: (() => void) | null = null;
+  private finderCommandDepth = 0;
+  private finderMuted = false;
+  private backendMonitorMuted = false;
+  private monitorMuteOwners = new Set<object>();
+  private get monitorMuted(): boolean { return this.backendMonitorMuted || this.monitorMuteOwners.size > 0; }
+  private backendCleanActive = false;
+  private backendCleanPlayback: OpenWebRxPlayback | null = null;
+  private manualCleaningHz: number | null = null;
+  setBackendMonitorMuted(muted: boolean, owner?: object): void {
+    if (owner) {
+      if (muted) this.monitorMuteOwners.add(owner);
+      else this.monitorMuteOwners.delete(owner);
+    } else this.backendMonitorMuted = muted;
+    this.backendCleanPlayback?.setVolume(this.monitorMuted ? 0 : this.state.volume);
+    const volume = this.monitorMuted || this.backendCleanActive || this.finderMuted || this.digitalMute ? 0 : this.state.volume;
+    this.demodulator?.setVolume(volume); this.owrxPlayback?.setVolume(volume);
+  }
+  private finderCleaner: FinderCleaner | null = null;
+  private finderCleanerTap: (() => void) | null = null;
+  private cleanerSpectrum: ReceiverSpectrum | null = null;
+  private cleanerSpectrumTap: (() => void) | null = null;
   private readonly signalId = new HybridSignalId();
   private readonly squelchGate = new SquelchGate();
   private readonly afcTracker = new AfcTracker();
@@ -190,6 +220,10 @@ export class RadioController {
   private knownModes: Record<string, ReturnType<typeof getMode>> = {};
   private stateListeners = new Set<StateListener>();
   private spectrumListeners = new Set<SpectrumListener>();
+  private displayListeners = new Set<SpectrumListener>();
+  private detailSpectrum: Spectrum | null = null;
+  private detailBuffer = new Float32Array(8192);
+  private spectrumView = { offsetHz: 0, spanHz: Infinity };
   private lastSquelchEvalMs = 0;
   private lastAfcEvalMs = 0;
   private digitalMute = false;
@@ -216,7 +250,15 @@ export class RadioController {
   /** A retune the HackRF hasn't answered yet; older-centre rows are dropped. */
   private externalPending: { hz: number; since: number } | null = null;
   private onSampleClick = () => this.emitSpectrum();
+  private diagnosticAudioListeners = new Set<PcmListener>();
+  private diagnosticIqListeners = new Set<IqListener>();
   private onTapAudio = (mono: Float32Array, sampleRate: number) => {
+    if (this.diagnosticAudioListeners.size > 0) {
+      // Local decoder taps use equal-power stereo summing. Diagnostic raw
+      // and playback PCM must instead share the same per-channel amplitude.
+      const diagnosticMono = this.player ? mono.map((sample) => sample * Math.SQRT1_2) : mono;
+      for (const listener of this.diagnosticAudioListeners) listener(diagnosticMono, sampleRate);
+    }
     this.transcription.pushAudio(mono, sampleRate);
     this.fsk.pushAudio(mono, sampleRate);
     this.ft8.pushAudio(mono, sampleRate);
@@ -232,6 +274,10 @@ export class RadioController {
     sampleRate: DEFAULT_SAMPLE_RATE,
     scheme: "WBFM",
     volume: 0.8,
+  audioNoiseReduction: "off",
+  voiceIsolation: false,
+  voiceIsolationLoading: false,
+  audioEnhancementError: null,
     autoGain: true,
     gainDb: 20,
     bandwidthHz: 150_000,
@@ -253,7 +299,12 @@ export class RadioController {
     return this.state;
   }
 
+  private voiceIsolationEpoch = 0;
+
   detectCapabilities(): void {
+    const audio = restoreAudioEnhancementSettings();
+    this.patch({ audioNoiseReduction: audio.noiseReduction, audioSpeechFilter: Boolean(audio.speechFilter) });
+    if (audio.voiceIsolation) void this.setVoiceIsolation(true);
     this.patch({ webUsbSupported: isWebUsbSupported() });
   }
 
@@ -263,9 +314,61 @@ export class RadioController {
     return () => this.stateListeners.delete(listener);
   }
 
-  onSpectrum(listener: SpectrumListener): () => void {
+  onSpectrum(listener: SpectrumListener, display = false): () => void {
     this.spectrumListeners.add(listener);
-    return () => this.spectrumListeners.delete(listener);
+    if (display) this.displayListeners.add(listener);
+    return () => { this.spectrumListeners.delete(listener); this.displayListeners.delete(listener); };
+  }
+
+  setSpectrumView(offsetHz: number, spanHz: number): void {
+    this.spectrumView = { offsetHz, spanHz };
+    this.detailSpectrum?.setView(offsetHz, spanHz);
+  }
+
+  getDiagnosticSnapshot() {
+    return { capturedAt: new Date().toISOString(), state: this.state,
+      listenFrequencyHz: this.state.frequencyHz + this.state.offsetHz,
+      audio: this.backendCleanActive ? this.backendCleanPlayback?.getDiagnostics() ?? null : this.player?.getDiagnostics() ?? this.owrxPlayback?.getDiagnostics() ?? null,
+      cleaner: this.finder?.getState().cleaning ?? null,
+      backendCleanActive: this.backendCleanActive,
+      spectrum: this.spectrum?.getFrameInfo() ?? null,
+      view: this.spectrumView,
+      capabilities: { audioCapture: Boolean(this.player || this.owrxPlayback), iqCapture: Boolean(this.radio),
+        browserDsp: Boolean(this.dsp), microphone: false } };
+  }
+
+  /** Demodulated PCM before playback cleanup/volume; does not replace the receiver. */
+  onRawAudio(listener: PcmListener): () => void {
+    this.diagnosticAudioListeners.add(listener);
+    this.syncTapping();
+    return () => { this.diagnosticAudioListeners.delete(listener); this.syncTapping(); };
+  }
+
+  captureDiagnosticAudio(durationMs = 1_000, maxSamples = 480_000, stage: "raw" | "playback" = "playback") {
+    if (this.state.status !== "playing") throw new Error("Start the receiver before capturing audio");
+    const player = stage === "playback" && this.backendCleanActive ? this.backendCleanPlayback : this.player ?? this.owrxPlayback;
+    if (!player) throw new Error("This receiver has no browser audio stream");
+    const state = { ...this.state };
+    const subscribe = stage === "playback"
+      ? (listener: PcmListener) => player.onPlaybackAudio(listener)
+      : (listener: PcmListener) => {
+          this.diagnosticAudioListeners.add(listener); this.syncTapping();
+          return () => { this.diagnosticAudioListeners.delete(listener); this.syncTapping(); };
+        };
+    return captureAudioStream(subscribe, durationMs, maxSamples).then((result) => {
+      if (this.state.frequencyHz + this.state.offsetHz !== state.frequencyHz + state.offsetHz || this.state.scheme !== state.scheme || this.state.connection !== state.connection) {
+        throw new Error("Receiver tuning or source changed during audio capture");
+      }
+      return { ...result, stage, receiver: state };
+    });
+  }
+
+  captureDiagnosticIq(durationMs = 250, maxSamples = 262_144) {
+    if (!this.radio || this.state.status !== "playing") throw new Error("Native IQ capture requires a playing RTL-SDR, rtl_tcp, or demo receiver");
+    return captureIqStream((listener) => {
+      this.diagnosticIqListeners.add(listener);
+      return () => { this.diagnosticIqListeners.delete(listener); };
+    }, durationMs, maxSamples);
   }
 
   getTranscriptionState(): TranscriptionState {
@@ -448,11 +551,174 @@ export class RadioController {
     return this.scanner.getState();
   }
 
+  private getFinder(): AutonomousFinder {
+    if (!this.finder) {
+      const owned = async (work: () => Promise<void>) => {
+        this.finderCommandDepth++;
+        try { await work(); } finally { this.finderCommandDepth--; }
+      };
+      this.finder = new AutonomousFinder({
+        state: () => this.state,
+        spectrum: () => this.finderSpectrum,
+        tune: (center, offset) => owned(async () => { await this.setFrequency(center); this.setOffset(offset); }),
+        prepare: (bandwidth) => owned(async () => {
+          if (this.state.sampleRate !== 1_024_000) await this.setSampleRate(1_024_000);
+          this.setScheme("AM"); this.setBandwidth(bandwidth); this.setAutoSquelch(false); this.setSquelch(0); this.setAfc(false);
+          this.setAudioSpeechFilter(true); this.setAudioNoiseReduction("low"); await this.setVoiceIsolation(false);
+        }),
+        mute: (muted) => {
+          this.finderMuted = muted;
+          const volume = this.digitalMute || muted || this.monitorMuted || this.backendCleanActive ? 0 : this.state.volume;
+          this.demodulator?.setVolume(volume); this.owrxPlayback?.setVolume(volume);
+        },
+        capture: () => this.captureDiagnosticAudio(4000, 192000, "raw"),
+        ready: async (signal) => {
+          const response = await fetch("/api/autofinder/status", { signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]), cache: "no-store" });
+          if (!response.ok || !(await response.json()).available) throw new Error("Local AI speech detector is unavailable. Start the SigSense API to search automatically.");
+        },
+        assess: async (data, signal) => {
+          const bytes = Uint8Array.from(atob(data), (character) => character.charCodeAt(0));
+          const response = await fetch("/api/autofinder/assess", { method: "POST", body: bytes, headers: { "Content-Type": "audio/wav" }, signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) });
+          if (!response.ok) throw new Error(`Local AI speech check failed (${response.status}); search stopped.`);
+          return await response.json() as SpeechAssessment;
+        },
+        restore: (original, dial) => owned(async () => {
+          if (!dial) return;
+          this.setScheme(original.scheme); this.setBandwidth(original.bandwidthHz);
+          this.setSquelch(original.squelch); this.setAutoSquelch(original.autoSquelch); this.setAfc(original.afc);
+          this.setAudioSpeechFilter(Boolean(original.audioSpeechFilter)); this.setAudioNoiseReduction(original.audioNoiseReduction);
+          await this.setVoiceIsolation(original.voiceIsolation);
+          if (this.state.sampleRate !== original.sampleRate) await this.setSampleRate(original.sampleRate);
+          await this.setFrequency(original.frequencyHz); this.setOffset(original.offsetHz);
+          await this.setGain(original.gainDb); await this.setAutoGain(original.autoGain);
+        }),
+      });
+      this.finder.subscribe(() => {
+        this.syncFinderCleaner();
+        if (!this.finder?.active && this.finder?.getState().status !== "starting") {
+          this.finderUntap?.(); this.finderUntap = null;
+        }
+      });
+    }
+    return this.finder;
+  }
+
+  getAutofinderState(): FinderState { return this.getFinder().getState(); }
+  private syncFinderCleaner(): void {
+    const finder = this.finder?.getState();
+    const target = finder && ["listening", "keeping"].includes(finder.status) ? finder.frequencyHz : this.manualCleaningHz;
+    if (target === null || target === undefined) {
+      this.finderCleanerTap?.(); this.finderCleanerTap = null;
+      this.cleanerSpectrumTap?.(); this.cleanerSpectrumTap = null; this.cleanerSpectrum = null;
+      this.finderCleaner?.setTarget(null);
+      this.backendCleanActive = false;
+      this.backendCleanPlayback?.close(); this.backendCleanPlayback = null;
+      this.setBackendMonitorMuted(this.backendMonitorMuted);
+      return;
+    }
+    if (!this.finderCleaner) this.finderCleaner = new FinderCleaner(() => {
+      const state = this.state, spectrum = this.cleanerSpectrum;
+      const tunedHz = state.frequencyHz + state.offsetHz;
+      let detail: Record<string, unknown> | undefined;
+      if (spectrum?.startHz !== undefined && spectrum.centerHz === state.frequencyHz && Date.now() - Date.parse(spectrum.capturedAt) < 1200) {
+        const from = Math.max(0, Math.floor((tunedHz - 8000 - spectrum.startHz) / spectrum.binHz));
+        const to = Math.min(spectrum.values.length, Math.ceil((tunedHz + 8000 - spectrum.startHz) / spectrum.binHz));
+        detail = { values: spectrum.values.slice(from, to), startHz: spectrum.startHz + from * spectrum.binHz, binHz: spectrum.binHz };
+      }
+      return { frequencyHz: target, tunedHz, source: state.connection, gainDb: state.gainDb,
+        rfClipFraction: state.rfClipFraction ?? 0, bandwidthHz: state.bandwidthHz, spectrum: detail };
+    }, (cleaning) => {
+      if (["error", "stopped"].includes(cleaning.status)) {
+        this.backendCleanActive = false;
+        this.backendCleanPlayback?.close(); this.backendCleanPlayback = null;
+        this.setBackendMonitorMuted(this.backendMonitorMuted);
+      }
+      this.finder?.setCleaning(cleaning);
+    }, (advice) => {
+      const activeHz = this.finder?.active && ["listening", "keeping"].includes(this.finder.getState().status) ? this.finder.getState().frequencyHz : this.manualCleaningHz;
+      if (!activeHz || advice.frequencyHz !== activeHz || this.state.status !== "playing") return;
+      this.finderCommandDepth++;
+      try {
+        if (typeof advice.gainDb === "number" && advice.gainDb >= 0 && advice.gainDb < this.state.gainDb) void this.setGain(advice.gainDb).catch(() => {});
+        if (advice.bandwidthHz === 4000 && this.state.bandwidthHz > 4000) this.setBandwidth(4000);
+        if (typeof advice.offsetCorrectionHz === "number" && Math.abs(advice.offsetCorrectionHz) <= 250
+          && Math.abs(this.state.frequencyHz + this.state.offsetHz + advice.offsetCorrectionHz - activeHz) <= 500) this.setOffset(this.state.offsetHz + advice.offsetCorrectionHz);
+      } finally { this.finderCommandDepth--; }
+    }, (pcm, rate) => {
+      if (typeof location !== "undefined" && new URLSearchParams(location.search).get("receiverAgent") === "1") return;
+      if (!this.backendCleanPlayback) this.prepareCleanPlayback();
+      this.backendCleanActive = true;
+      this.setBackendMonitorMuted(this.backendMonitorMuted);
+      this.backendCleanPlayback?.push(pcm, rate);
+    });
+    this.finderCleaner.setTarget(target);
+    if (!this.cleanerSpectrumTap) this.cleanerSpectrumTap = this.onSpectrum((values, center, info) => {
+      if (this.cleanerSpectrum && Date.now() - Date.parse(this.cleanerSpectrum.capturedAt) < 400) return;
+      const n = values.length, rate = info?.sampleRate ?? this.state.sampleRate, centerHz = center ?? this.state.frequencyHz;
+      const centerOffsetHz = info?.centerOffsetHz ?? 0;
+      this.cleanerSpectrum = { values: Array.from({ length: n }, (_, i) => values[(i + Math.floor(n / 2)) % n]),
+        sampleRate: rate, centerHz, centerOffsetHz, startHz: centerHz + centerOffsetHz - rate / 2,
+        binHz: rate / n, capturedAt: new Date().toISOString(), binOrder: "ascending-frequency" };
+    });
+    if (!this.finderCleanerTap) {
+      const tap: PcmListener = (mono, rate) => {
+        const current = this.finder?.getState();
+        const activeHz = current && ["listening", "keeping"].includes(current.status) ? current.frequencyHz : this.manualCleaningHz;
+        if (activeHz && Math.abs(this.state.frequencyHz + this.state.offsetHz - activeHz) < 1000) this.finderCleaner?.push(mono, rate);
+      };
+      this.diagnosticAudioListeners.add(tap); this.syncTapping();
+      this.finderCleanerTap = () => { this.diagnosticAudioListeners.delete(tap); this.syncTapping(); };
+    }
+  }
+  private prepareCleanPlayback(): void {
+    if (typeof location !== "undefined" && new URLSearchParams(location.search).get("receiverAgent") === "1") return;
+    this.backendCleanPlayback ??= new OpenWebRxPlayback(new AudioEnhancer(() => ({ noiseReduction: "off", voiceIsolation: false })));
+    this.backendCleanPlayback.unlock();
+    this.backendCleanPlayback.setVolume(this.monitorMuted ? 0 : this.state.volume);
+  }
+  startSignalCleaning(frequencyHz: number): void {
+    if (this.state.status !== "playing" || this.state.scheme !== "AM") return;
+    this.getFinder(); this.prepareCleanPlayback();
+    this.manualCleaningHz = frequencyHz; this.syncFinderCleaner();
+  }
+  private cancelManualCleaning(): void {
+    if (!this.finderCommandDepth && this.manualCleaningHz !== null) { this.manualCleaningHz = null; this.syncFinderCleaner(); }
+  }
+  subscribeAutofinder(listener: () => void): () => void { return this.getFinder().subscribe(listener); }
+  async startAutofinder(maxListenMs?: number): Promise<void> {
+    this.manualCleaningHz = null;
+    this.prepareCleanPlayback();
+    if (this.getFinder().active) return;
+    this.scanner.stop();
+    if (this.state.status !== "playing") {
+      const host = typeof location === "undefined" ? "127.0.0.1" : location.hostname;
+      await this.connectRtlServer(`http://${host}:8081`);
+    }
+    if (this.state.status !== "playing") throw new Error(this.state.error ?? "Could not connect to RTL-SDR");
+    if (!["rtltcp", "device", "demo"].includes(this.state.connection)) throw new Error("Automatic HF search currently requires an RTL-SDR receiver");
+    this.finderUntap?.();
+    this.finderSpectrum = null;
+    this.finderUntap = this.onSpectrum((spectrum, center, info) => {
+      if (this.finderSpectrum && Date.now() - Date.parse(this.finderSpectrum.capturedAt) < 150) return;
+      const rate = info?.sampleRate ?? this.state.sampleRate, n = spectrum.length;
+      const centerHz = center ?? this.state.frequencyHz, offset = info?.centerOffsetHz ?? 0;
+      this.finderSpectrum = { values: Array.from({ length: n }, (_, i) => spectrum[(i + Math.floor(n / 2)) % n]),
+        centerHz, centerOffsetHz: offset, startHz: centerHz + offset - rate / 2,
+        sampleRate: rate, binHz: rate / n, binOrder: "ascending-frequency", capturedAt: new Date().toISOString() };
+    });
+    try { this.getFinder().start(maxListenMs); } catch (error) { this.finderUntap?.(); this.finderUntap = null; throw error; }
+  }
+  stopAutofinder(keep = false): Promise<void> { return this.getFinder().stop(keep); }
+  skipAutofinder(): void { this.getFinder().skip(); }
+  keepAutofinder(): void { this.getFinder().keep(); }
+  resumeAutofinder(): void { this.getFinder().resume(); }
+
   subscribeScanner(listener: ScannerListener): () => void {
     return this.scanner.subscribe(listener);
   }
 
   async startScanner(): Promise<void> {
+    await this.finder?.stop();
     this.bindScannerHooks();
     await this.scanner.start();
   }
@@ -614,9 +880,30 @@ export class RadioController {
       return;
     }
 
+    const epoch = this.sessionEpoch;
+    this.patch({ status: "starting", error: null });
     const dsp = await this.ensureDsp();
-    if (!dsp) return;
-    const provider = new RtlTcpDeviceProvider(wsUrl);
+    if (!dsp || epoch !== this.sessionEpoch) return;
+    try {
+      // The unattended receiver shares the single-client RTL bridge with this browser.
+      if (typeof location !== "undefined" && new URLSearchParams(location.search).get("receiverAgent") !== "1") {
+        const response = await fetch("/api/autofinder-service", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "release" }), signal: AbortSignal.timeout(40_000) });
+        // An offline supervisor does not prevent normal standalone receiver use.
+        if (!response.ok && response.status !== 503 && response.status !== 404) {
+          const body = await response.json().catch(() => null);
+          throw new Error(`Could not release the background receiver: ${body?.error ?? `HTTP ${response.status}`}`);
+        }
+      }
+    } catch (error) {
+      if (epoch === this.sessionEpoch) this.patch({ status: "error", error: errorMessage(error) });
+      return;
+    }
+    // A Stop or another connection while DSP/handoff was pending owns the receiver now.
+    if (epoch !== this.sessionEpoch) return;
+    const provider = new RtlTcpDeviceProvider(wsUrl, (metrics, gainDb) => {
+      this.patch({ rfClipFraction: metrics.railFraction, ...(gainDb === null ? {} : { gainDb }) });
+    });
     await this.startWithProvider(new dsp.RtlProvider(provider), "rtltcp");
   }
 
@@ -1005,6 +1292,11 @@ export class RadioController {
   }
 
   async stop(): Promise<void> {
+    this.manualCleaningHz = null;
+    this.finderCleaner?.setTarget(null);
+    this.backendCleanActive = false;
+    this.backendCleanPlayback?.close(); this.backendCleanPlayback = null;
+    await this.finder?.stop(false, true);
     this.sessionEpoch += 1;
     this.scanner.stop();
     if (this.external) {
@@ -1035,7 +1327,11 @@ export class RadioController {
       });
       return;
     }
-    if (!this.radio) return;
+    if (!this.radio) {
+      // RTL startup can still be loading DSP or waiting for receiver handoff.
+      if (this.state.status === "starting") this.patch({ status: "idle", connection: "disconnected", error: null });
+      return;
+    }
     this.patch({ status: "stopping", error: null });
     try {
       await this.radio.stop();
@@ -1052,6 +1348,8 @@ export class RadioController {
   }
 
   async setFrequency(hz: number): Promise<void> {
+    this.cancelManualCleaning();
+    if (this.finder?.active && !this.finderCommandDepth) void this.finder.stop(false, true);
     const maxHz =
       this.owrx || this.kiwi || this.external ? 6_000_000_000 : 1_766_000_000;
     const frequencyHz = clamp(Math.round(hz), 0, maxHz);
@@ -1176,6 +1474,8 @@ export class RadioController {
   }
 
   setOffset(hz: number): void {
+    this.cancelManualCleaning();
+    if (this.finder?.active && !this.finderCommandDepth) void this.finder.stop(false, true);
     const half = this.state.sampleRate / 2;
     const offsetHz = clamp(Math.round(hz), -half, half);
     this.patch({ offsetHz });
@@ -1199,7 +1499,11 @@ export class RadioController {
       this.setOffset(offset);
       return;
     }
-    void this.setFrequency(target).then(() => this.setOffset(0));
+    void this.setFrequency(target).then(() => {
+      // Fixed-center remote receivers may reject the retune. Keep their
+      // existing listen offset instead of silently jumping to the old center.
+      if (this.state.frequencyHz === target) this.setOffset(0);
+    });
   }
 
   /** Retune the LO so `absoluteHz` sits at center and clear the offset. */
@@ -1221,9 +1525,36 @@ export class RadioController {
   setVolume(volume: number): void {
     const v = clamp(volume, 0, 1);
     this.patch({ volume: v });
-    if (!this.digitalMute) {
+    this.backendCleanPlayback?.setVolume(this.monitorMuted ? 0 : v);
+    if (!this.digitalMute && !this.finderMuted && !this.monitorMuted && !this.backendCleanActive) {
       this.demodulator?.setVolume(v);
       this.owrxPlayback?.setVolume(v);
+    }
+  }
+
+  setAudioNoiseReduction(level: AudioNoiseReduction): void {
+    setAudioEnhancementSettings({ noiseReduction: level });
+    this.patch({ audioNoiseReduction: level });
+  }
+
+  setAudioSpeechFilter(enabled: boolean): void {
+    setAudioEnhancementSettings({ speechFilter: enabled });
+    this.patch({ audioSpeechFilter: enabled });
+  }
+
+  async setVoiceIsolation(enabled: boolean): Promise<void> {
+    const epoch = ++this.voiceIsolationEpoch;
+    setAudioEnhancementSettings({ voiceIsolation: enabled });
+    this.patch({ voiceIsolation: enabled, voiceIsolationLoading: enabled, audioEnhancementError: null });
+    if (!enabled) return;
+    try {
+      await loadVoiceIsolation();
+      if (epoch === this.voiceIsolationEpoch) this.patch({ voiceIsolationLoading: false });
+    } catch (error) {
+      if (epoch !== this.voiceIsolationEpoch) return;
+      setAudioEnhancementSettings({ voiceIsolation: false });
+      this.patch({ voiceIsolation: false, voiceIsolationLoading: false,
+        audioEnhancementError: error instanceof Error ? error.message : "Voice isolation could not load" });
     }
   }
 
@@ -1242,6 +1573,8 @@ export class RadioController {
   }
 
   setScheme(scheme: DemodScheme): void {
+    this.cancelManualCleaning();
+    if (this.finder?.active && !this.finderCommandDepth) void this.finder.stop(false, true);
     this.afcTracker.reset();
     if (!this.dsp) {
       // No browser DSP (HackRF / OpenWebRX only): modes are registered by the DSP
@@ -1282,6 +1615,8 @@ export class RadioController {
   }
 
   setBandwidth(hz: number): void {
+    this.cancelManualCleaning();
+    if (this.finder?.active && !this.finderCommandDepth) void this.finder.stop(false, true);
     if (!this.dsp) {
       if (this.state.scheme === "WBFM") return; // fixed width, as in the DSP
       this.patch({ bandwidthHz: clamp(Math.round(hz), 50, 200_000) });
@@ -1392,14 +1727,30 @@ export class RadioController {
     this.untap = player.onAudio(this.onTapAudio);
 
     const demodulator = new dsp.Demodulator({ player });
-    const spectrum = new dsp.Spectrum(FFT_SIZE);
+    const fftSize = this.state.frequencyHz < 30_000_000 ? 8192 : FFT_SIZE;
+    const spectrum = new dsp.Spectrum(fftSize);
+    this.spectrumBuffer = new Float32Array(fftSize);
+    const detailSpectrum = new dsp.Spectrum(8192, .16, true);
+    detailSpectrum.setView(this.spectrumView.offsetHz, this.spectrumView.spanHz);
+    this.detailSpectrum = detailSpectrum;
     const sampleCounter = new dsp.SampleCounter(20);
     this.p25Iq.setSampleRate(this.state.sampleRate);
     this.p25Iq.setOffsetHz(this.state.offsetHz);
     this.p25Iq.setSink((dibits, lock) => this.p25.pushDibits(dibits, lock));
     this.bindP25Hooks();
+    this.signalId.setIqMode(true);
+    const signalIqReceiver = {
+      sampleRate: this.state.sampleRate,
+      setSampleRate(sampleRate: number) { this.sampleRate = sampleRate; },
+      receiveSamples: (block: { I: Float32Array; Q: Float32Array; frequency: number }) => {
+        for (const listener of this.diagnosticIqListeners) listener(block.I, block.Q, signalIqReceiver.sampleRate, block.frequency);
+        this.signalId.pushIq(block.I, block.Q, block.frequency, signalIqReceiver.sampleRate);
+      },
+    };
     const receiver = dsp.CompositeReceiver.of(
+      signalIqReceiver,
       spectrum,
+      detailSpectrum,
       demodulator,
       sampleCounter,
       this.p25Iq,
@@ -1443,7 +1794,11 @@ export class RadioController {
 
       const baseMode = this.knownModes[this.state.scheme] ?? getMode("WBFM");
       let mode = baseMode;
-      const params = modeParameters(mode);
+      let params = modeParameters(mode);
+      if (params.hasBandwidth()) {
+        params = params.setBandwidth(this.state.bandwidthHz);
+        mode = params.mode;
+      }
       if (params.hasSquelch()) {
         mode = params.setSquelch(0).mode;
         this.knownModes[mode.scheme] = mode;
@@ -1510,6 +1865,13 @@ export class RadioController {
       return;
     }
 
+    const fftSize = this.state.frequencyHz < 30_000_000 ? 8192 : FFT_SIZE;
+    if (this.spectrum.size !== fftSize) {
+      this.spectrum.size = fftSize;
+      this.spectrumBuffer = new Float32Array(fftSize);
+      return;
+    }
+    if (!this.spectrum.isReady()) return;
     this.spectrum.getSpectrum(this.spectrumBuffer);
     const center = this.spectrum.frequency();
 
@@ -1528,8 +1890,15 @@ export class RadioController {
         this.state.frequencyHz,
       );
     }
+    const detail = this.detailSpectrum;
+    const useDetail = detail?.isReady() && detail.getFrameInfo().sampleRate < this.state.sampleRate;
+    if (detail && useDetail) detail.getSpectrum(this.detailBuffer);
     for (const listener of this.spectrumListeners) {
-      listener(this.spectrumBuffer, center);
+      if (detail && useDetail && this.displayListeners.has(listener)) {
+        listener(this.detailBuffer, center, detail.getFrameInfo());
+      } else {
+        listener(this.spectrumBuffer, center, this.spectrum.getFrameInfo());
+      }
     }
   }
 
@@ -1640,6 +2009,7 @@ export class RadioController {
   }
 
   private teardown(): void {
+    this.signalId.setIqMode(false);
     this.signalId.reset();
     this.squelchGate.reset();
     this.afcTracker.reset();
@@ -1653,10 +2023,12 @@ export class RadioController {
     this.untap = null;
     this.player?.setTapping(false);
     this.player?.setSquelched(false);
+    this.player?.close();
     this.player = null;
     this.radio = null;
     this.demodulator = null;
     this.spectrum = null;
+    this.detailSpectrum = null;
     this.sampleCounter = null;
   }
 
@@ -1685,13 +2057,14 @@ export class RadioController {
 
   private setDigitalMute(muted: boolean): void {
     this.digitalMute = muted;
-    const volume = muted ? 0 : this.state.volume;
+    const volume = muted || this.finderMuted || this.monitorMuted || this.backendCleanActive ? 0 : this.state.volume;
     this.demodulator?.setVolume(volume);
     this.owrxPlayback?.setVolume(volume);
   }
 
   private wantAudioTap(): boolean {
     return (
+      this.diagnosticAudioListeners.size > 0 ||
       this.transcription.getState().enabled ||
       this.fsk.getState().enabled ||
       this.ft8.getState().enabled ||

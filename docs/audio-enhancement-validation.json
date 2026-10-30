@@ -1,0 +1,31 @@
+{
+  "scope": "8 seconds of speech from the RNNoise author demo, with seeded added white noise at 10 dB SNR and 1-second noise-only margins. Not a captured radio benchmark.",
+  "speech_source": "https://jmvalin.ca/demo/rnnoise/samples/clean.opus",
+  "sample_rate": 48000,
+  "results": {
+    "noisy": {
+      "delay_ms": 0.0,
+      "speech_correlation": 0.953429691008308,
+      "speech_gain": 0.9999580637028327,
+      "si_sdr_db": 9.99670132489729,
+      "tail_noise_rms": 0.014125258486221749,
+      "noise_attenuation_db": 0.0
+    },
+    "nr-medium": {
+      "delay_ms": 10.666666666666666,
+      "speech_correlation": 0.9820559944022638,
+      "speech_gain": 0.8983750324796591,
+      "si_sdr_db": 14.332371900009104,
+      "tail_noise_rms": 0.002772569260939244,
+      "noise_attenuation_db": 14.142279999948126
+    },
+    "voice-isolated": {
+      "delay_ms": 30.0,
+      "speech_correlation": 0.9848728927965236,
+      "speech_gain": 0.96689759206268,
+      "si_sdr_db": 15.0927091872248,
+      "tail_noise_rms": 2.3196140160098194e-07,
+      "noise_attenuation_db": 95.69161359416483
+    }
+  }
+}

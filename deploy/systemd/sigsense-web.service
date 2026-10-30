@@ -1,0 +1,16 @@
+[Unit]
+Description=SigSense Web
+After=network.target sigsense-api.service
+Wants=sigsense-api.service
+
+[Service]
+User=cole
+WorkingDirectory=/home/cole/sigsense/apps/web
+Environment=NODE_ENV=production
+Environment=PATH=/home/cole/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/cole/.local/bin/pnpm start --hostname 0.0.0.0 --port 3000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

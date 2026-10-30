@@ -63,7 +63,9 @@ export class TranscriptionHub {
     this.remote.setOptions({
       language: typeof options.language === "string" ? options.language : "en",
       prompt: typeof options.prompt === "string" ? options.prompt : "",
+      task: options.task === "translate" ? "translate" : "transcribe",
     });
+    this.device.setOptions(this.remote.getOptions());
   }
 
   getState(): TranscriptionState {
@@ -84,15 +86,20 @@ export class TranscriptionHub {
   }
 
   setOptions(options: Partial<TranscribeOptions>): void {
+    const previousTask = this.remote.getOptions().task ?? "transcribe";
     this.remote.setOptions(options);
+    this.device.setOptions(this.remote.getOptions());
     writeStored(OPTIONS_KEY, this.remote.getOptions());
+    if (previousTask !== (this.remote.getOptions().task ?? "transcribe") && this.snapshot.enabled) {
+      void this.restart();
+    }
   }
 
   setTap(send: ((config: TranscribeTapConfig) => void) | null): void {
     this.remote.setTap(send);
     // A HackRF just attached while the browser engine was running: move to the
     // server tap so the phone stops doing the work.
-    if (send && this.snapshot.enabled && this.active === "device" && this.preference !== "device") {
+    if (send && this.snapshot.enabled && this.active === "device" && this.preference !== "device" && this.getOptions().task !== "translate") {
       void this.restart();
     }
   }
@@ -145,6 +152,7 @@ export class TranscriptionHub {
   }
 
   private async choose(): Promise<TranscriptionEngineKind> {
+    if (this.getOptions().task === "translate") return "device";
     if (this.preference === "device") return "device";
     if (this.preference === "server") return "server";
     const status = await fetchSttStatus();

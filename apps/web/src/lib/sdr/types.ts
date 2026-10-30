@@ -24,8 +24,14 @@ export type SdrState = {
   sampleRate: number;
   scheme: DemodScheme;
   volume: number;
+  audioNoiseReduction: "off" | "low" | "medium" | "high";
+  voiceIsolation: boolean;
+  audioSpeechFilter?: boolean;
+  voiceIsolationLoading: boolean;
+  audioEnhancementError: string | null;
   autoGain: boolean;
   gainDb: number;
+  rfClipFraction?: number;
   bandwidthHz: number;
   /**
    * Manual: dB above noise floor required to open (0 = off).
@@ -100,4 +106,3 @@ export function nearestSampleRate(hz: number): number {
   }
   return best;
 }
-

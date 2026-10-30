@@ -1,5 +1,8 @@
 import { bandById } from "@/lib/sdr/shortwave/bands";
+import { languageLabel } from "@/lib/sdr/shortwave/languages";
 import type {
+  ShortwaveBandId,
+  ShortwaveChannel,
   ShortwaveEntry,
   ShortwaveFilters,
   ShortwaveLive,
@@ -141,14 +144,18 @@ export function filterSchedule(
   const weekday = eibiWeekday(now);
   const band = filters.bandId ? bandById(filters.bandId) : null;
   const q = filters.query.trim().toLowerCase();
+  const frequencyQuery = q.match(/^(\d+(?:\.\d+)?)\s*(mhz|khz)$/);
+  const queryKHz = frequencyQuery
+    ? Number(frequencyQuery[1]) * (frequencyQuery[2] === "mhz" ? 1_000 : 1)
+    : null;
 
   const out: ShortwaveLive[] = [];
   for (const entry of entries) {
     if (band && (entry.f < band.loKHz || entry.f > band.hiKHz)) continue;
     if (filters.language && entry.l !== filters.language) continue;
     if (q) {
-      const hay = `${entry.n} ${entry.i} ${entry.l} ${entry.f} ${entry.t}`.toLowerCase();
-      if (!hay.includes(q)) continue;
+      const hay = `${entry.n} ${entry.i} ${entry.l} ${languageLabel(entry.l)} ${entry.f} ${entry.t}`.toLowerCase();
+      if (queryKHz !== null ? Math.abs(entry.f - queryKHz) > 0.05 : !hay.includes(q)) continue;
     }
 
     const live = toLive(entry, nowMin, weekday);
@@ -178,11 +185,11 @@ export function filterSchedule(
 
 export function formatLiveEta(live: ShortwaveLive): string {
   if (live.onAir) {
-    if (live.endsInMin == null) return "On air";
-    if (live.endsInMin < 60) return `${live.endsInMin}m left`;
+    if (live.endsInMin == null) return "Scheduled now";
+    if (live.endsInMin < 60) return `ends in ${live.endsInMin}m`;
     const h = Math.floor(live.endsInMin / 60);
     const m = live.endsInMin % 60;
-    return m === 0 ? `${h}h left` : `${h}h ${m}m left`;
+    return m === 0 ? `ends in ${h}h` : `ends in ${h}h ${m}m`;
   }
   if (live.startsInMin < 60) return `in ${live.startsInMin}m`;
   const h = Math.floor(live.startsInMin / 60);
@@ -224,6 +231,90 @@ export function lookupAtFrequency(
   });
 
   return out;
+}
+
+/**
+ * Find the adjacent distinct broadcast frequency in a filtered result list.
+ * Rows often share a frequency, so navigation skips duplicates instead of
+ * making the listener press Next several times without moving the receiver.
+ */
+export function adjacentBroadcastFrequency(
+  items: readonly ShortwaveLive[],
+  frequencyHz: number,
+  direction: -1 | 1,
+): number | null {
+  const frequencies = [...new Set(items.map((item) => item.frequencyHz))].sort(
+    (a, b) => a - b,
+  );
+
+  if (direction > 0) {
+    return frequencies.find((hz) => hz > frequencyHz + 1) ?? null;
+  }
+
+  for (let index = frequencies.length - 1; index >= 0; index -= 1) {
+    if (frequencies[index] < frequencyHz - 1) return frequencies[index];
+  }
+  return null;
+}
+
+export type ShortwaveChannelSort = "on-air" | "nearest" | "frequency";
+
+/** Collapse duplicate EiBi rows into actual frequencies a listener can tune. */
+export function groupBroadcastChannels(
+  items: readonly ShortwaveLive[],
+  listeningHz: number,
+  sort: ShortwaveChannelSort,
+): ShortwaveChannel[] {
+  const grouped = new Map<number, ShortwaveLive[]>();
+  for (const item of items) {
+    const rows = grouped.get(item.frequencyHz);
+    if (rows) rows.push(item);
+    else grouped.set(item.frequencyHz, [item]);
+  }
+
+  const channels = [...grouped].map(([frequencyHz, broadcasts]) => {
+    broadcasts.sort((a, b) => {
+      if (a.onAir !== b.onAir) return a.onAir ? -1 : 1;
+      if (a.startsInMin !== b.startsInMin) return a.startsInMin - b.startsInMin;
+      return a.entry.n.localeCompare(b.entry.n);
+    });
+    return {
+      frequencyHz,
+      broadcasts,
+      primary: broadcasts[0],
+      onAir: broadcasts.some((row) => row.onAir),
+    };
+  });
+
+  channels.sort((a, b) => {
+    if (sort === "nearest") {
+      const distance = Math.abs(a.frequencyHz - listeningHz) - Math.abs(b.frequencyHz - listeningHz);
+      if (distance !== 0) return distance;
+    } else if (sort === "on-air" && a.onAir !== b.onAir) {
+      return a.onAir ? -1 : 1;
+    }
+    return a.frequencyHz - b.frequencyHz;
+  });
+  return channels;
+}
+
+/** Best immediate entry point for a meter band: on-air first, then soonest. */
+export function firstBroadcastFrequencyForBand(
+  entries: readonly ShortwaveEntry[],
+  bandId: ShortwaveBandId,
+  now = new Date(),
+): number | null {
+  const candidates = filterSchedule(
+    entries,
+    { when: "all", bandId, language: null, query: "" },
+    now,
+  );
+  candidates.sort((a, b) => {
+    if (a.onAir !== b.onAir) return a.onAir ? -1 : 1;
+    if (a.startsInMin !== b.startsInMin) return a.startsInMin - b.startsInMin;
+    return a.frequencyHz - b.frequencyHz;
+  });
+  return candidates[0]?.frequencyHz ?? null;
 }
 
 let schedulePromise: Promise<ShortwaveSchedule> | null = null;

@@ -6,7 +6,7 @@ import { ShortwaveList } from "@/components/sdr/shortwave/shortwave-list";
 import { useShortwaveSchedule } from "@/components/sdr/shortwave/use-shortwave-schedule";
 import { useTuneShortwave } from "@/components/sdr/shortwave/use-tune-shortwave";
 import { useSdrState } from "@/components/sdr/sdr-provider";
-import { lookupAtFrequency } from "@/lib/sdr/shortwave/schedule";
+import { groupBroadcastChannels, lookupAtFrequency } from "@/lib/sdr/shortwave/schedule";
 
 /**
  * Pins EiBi matches for the current dial frequency above the explorer list.
@@ -36,9 +36,13 @@ export function ShortwaveTunedMatches() {
       <p className="mb-1 text-[0.65rem] text-muted">
         At your dial · {matches.length} schedule
         {matches.length === 1 ? "" : "s"}
-        {liveCount > 0 ? ` · ${liveCount} on air` : ""}
+        {liveCount > 0 ? ` · ${liveCount} scheduled now` : ""}
       </p>
-      <ShortwaveList items={matches} onTune={tune} limit={12} />
+      <ShortwaveList
+        items={groupBroadcastChannels(matches, listenHz, "on-air")}
+        onTune={tune}
+        pageSize={12}
+      />
     </div>
   );
 }

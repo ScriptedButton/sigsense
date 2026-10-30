@@ -13,6 +13,7 @@ export const BACKEND_CLASSES: readonly string[] = [
   "ASK4", "ASK8", "ASK16", "FSK4", "FSK8", "FSK16", "GFSK4", "GFSK8",
   "MSK", "GMSK", "16PSK", "32PSK", "QAM32", "QAM256", "APSK16", "APSK32",
   "5G-NR", "ITS-G5", "C-V2X", "DVB-T",
+  "SSB", "Carrier", "Digital",
 ];
 
 const KNOWN = new Set(BACKEND_CLASSES);

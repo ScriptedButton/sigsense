@@ -67,7 +67,7 @@ const TARGET_RATE = 16_000;
 const CHUNK_SECONDS = 4;
 const OVERLAP_SECONDS = 0.75;
 const SILENCE_RMS = 0.008;
-const MODEL_ID = "onnx-community/whisper-tiny.en";
+const MODEL_ID = "onnx-community/whisper-tiny";
 const MAX_SEGMENTS = 80;
 
 type AsrPipeline = (
@@ -76,7 +76,7 @@ type AsrPipeline = (
 ) => Promise<{ text: string } | { text: string }[]>;
 
 /**
- * Buffers demodulated PCM and runs browser-side Whisper (tiny.en) in chunks.
+ * Buffers demodulated PCM and runs multilingual browser-side Whisper in chunks.
  */
 export class TranscriptionEngine {
   private state: TranscriptionState = {
@@ -93,6 +93,16 @@ export class TranscriptionEngine {
   private loadPromise: Promise<void> | null = null;
   private busy = false;
   private disposed = false;
+  private options = { language: "en", task: "transcribe" as "transcribe" | "translate" };
+  private optionsVersion = 0;
+
+  setOptions(options: { language: string; task?: "transcribe" | "translate" }): void {
+    const next = { language: options.language, task: options.task ?? "transcribe" };
+    if (next.language === this.options.language && next.task === this.options.task) return;
+    this.options = next;
+    this.optionsVersion++;
+    this.buffer = new Float32Array(0);
+  }
 
   getState(): TranscriptionState {
     return this.state;
@@ -172,7 +182,9 @@ export class TranscriptionEngine {
       this.patch({ status: "loading", progress: 0, error: null });
       const { pipeline, env } = await import("@huggingface/transformers");
       env.allowLocalModels = false;
-      env.useBrowserCache = true;
+      // CacheStorage is unavailable on plain HTTP LAN origins. Forcing it on
+      // makes Transformers.js throw before any inference backend can load.
+      env.useBrowserCache = typeof globalThis.caches !== "undefined";
 
       const progress_callback = (data: {
         status?: string;
@@ -235,11 +247,20 @@ export class TranscriptionEngine {
     }
 
     this.busy = true;
+    const version = this.optionsVersion;
+    const options = { ...this.options };
     this.patch({ status: "transcribing" });
 
     try {
       const audio16k = resampleLinear(chunk, this.sampleRate, TARGET_RATE);
-      const result = await this.pipeline(audio16k);
+      const result = await this.pipeline(audio16k, {
+        task: options.task,
+        ...(options.language === "auto" ? {} : { language: options.language }),
+      });
+      if (version !== this.optionsVersion) {
+        this.patch({ status: this.state.enabled ? "listening" : "ready" });
+        return;
+      }
       const raw = Array.isArray(result) ? result[0]?.text : result.text;
       const text = cleanTranscript(raw ?? "");
       if (text) {

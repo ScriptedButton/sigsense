@@ -19,11 +19,15 @@ type WaterfallControlsProps = {
   speed: WaterfallSpeedId;
   direction: WaterfallDirectionId;
   dbRange: DbRangeId;
+  floorOffsetDb: number;
+  rangeDb: number;
   noiseFilter: NoiseFilterId;
   onPaletteChange: (id: WaterfallPaletteId) => void;
   onSpeedChange: (id: WaterfallSpeedId) => void;
   onDirectionChange: (id: WaterfallDirectionId) => void;
   onDbRangeChange: (id: DbRangeId) => void;
+  onFloorOffsetChange: (db: number) => void;
+  onRangeChange: (db: number) => void;
   onNoiseFilterChange: (id: NoiseFilterId) => void;
 };
 
@@ -32,11 +36,15 @@ export function WaterfallControls({
   speed,
   direction,
   dbRange,
+  floorOffsetDb,
+  rangeDb,
   noiseFilter,
   onPaletteChange,
   onSpeedChange,
   onDirectionChange,
   onDbRangeChange,
+  onFloorOffsetChange,
+  onRangeChange,
   onNoiseFilterChange,
 }: WaterfallControlsProps) {
   return (
@@ -105,6 +113,21 @@ export function WaterfallControls({
           ))}
         </select>
       </label>
+
+      {dbRange === "auto" && (
+        <>
+          <label className="flex items-center gap-1.5 text-[0.65rem] text-muted" title="Lower the black level to reveal faint signals; raise it to darken background noise">
+            Black level
+            <input aria-label="Waterfall black level" type="range" min={-12} max={12} step={1} value={floorOffsetDb} onChange={(e) => onFloorOffsetChange(Number(e.target.value))} className="w-20" />
+            <output className="w-9 font-mono">{floorOffsetDb} dB</output>
+          </label>
+          <label className="flex items-center gap-1.5 text-[0.65rem] text-muted" title="Smaller ranges give weak signals more color contrast">
+            Range
+            <input aria-label="Waterfall signal range" type="range" min={16} max={60} step={1} value={rangeDb} onChange={(e) => onRangeChange(Number(e.target.value))} className="w-20" />
+            <output className="w-9 font-mono">{rangeDb} dB</output>
+          </label>
+        </>
+      )}
 
       <NoiseFilterControl
         value={noiseFilter}

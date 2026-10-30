@@ -20,7 +20,7 @@ type ShortwaveFiltersProps = {
 };
 
 const WHEN_OPTIONS: { id: ShortwaveWhen; label: string }[] = [
-  { id: "now", label: "On now" },
+  { id: "now", label: "Scheduled now" },
   { id: "soon", label: "Soon" },
   { id: "all", label: "All" },
 ];

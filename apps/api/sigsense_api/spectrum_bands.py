@@ -39,9 +39,9 @@ MAX_BINS = 16384
 MAX_BANDS = 6
 MAX_SESSIONS = 16
 SESSION_IDLE_S = 120.0
-# Time percentile used for detection: a push-to-talk burst present in only a
-# few rows still shows, while steady noise keeps a stable floor.
-DETECT_PERCENTILE = 85.0
+# Short power averages preserve brief push-to-talk bursts without using a
+# noisy per-bin maximum of individual FFT rows.
+DETECT_WINDOW_ROWS = 4
 APPROXIMATION = (
     "Band crops come from averaged FFT rows, not IQ STFTs; time resolution is "
     "the display frame rate."
@@ -72,9 +72,13 @@ def decode_rows(data_b64: str, rows: int, bins: int, db_min: float, db_max: floa
 
 
 def _detection_spectrum(rows_db: np.ndarray) -> np.ndarray:
-    if rows_db.shape[0] < 4:
-        return rows_db.max(axis=0)
-    return np.percentile(rows_db, DETECT_PERCENTILE, axis=0).astype(np.float32)
+    window = min(DETECT_WINDOW_ROWS, rows_db.shape[0])
+    # Subtract a per-bin reference before exponentiation for numerical stability.
+    peak = rows_db.max(axis=0)
+    power = np.power(10.0, (rows_db.astype(np.float64) - peak) / 10.0)
+    cumulative = np.concatenate((np.zeros((1, power.shape[1])), np.cumsum(power, axis=0)))
+    means = (cumulative[window:] - cumulative[:-window]) / window
+    return (peak + 10.0 * np.log10(np.maximum(means.max(axis=0), 1e-30))).astype(np.float32)
 
 
 def _noise_model(rows_db: np.ndarray, floor_db: float):
@@ -212,13 +216,20 @@ def analyze_spectrum_rows(
             sample_rate=crop_bins * bin_hz,
             center_freq=band["center_freq_hz"],
         )
+        families = getattr(engine, "live_families", None)
+        evidence = "CNN on spectrum rows"
+        if families is not None:
+            prediction = families.refine(
+                prediction, rows_db, band["_lo_bin"], band["_hi_bin"], bin_hz
+            )
+            evidence = "RF family model on spectrum rows"
         observations.append(
             tracker.observe(
                 band_observation(
                     clean,
                     prediction,
                     frame_id=frame_id,
-                    evidence="CNN on spectrum rows",
+                    evidence=evidence,
                 ),
                 now=now,
             )

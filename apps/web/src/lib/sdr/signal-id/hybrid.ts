@@ -96,6 +96,14 @@ export class HybridSignalId implements SignalIdSource {
     }
   }
 
+  setIqMode(enabled: boolean): void {
+    this.remote.setIqMode(enabled);
+  }
+
+  pushIq(I: Float32Array, Q: Float32Array, centerHz: number, sampleRate: number): void {
+    if (!this.external) this.remote.pushIq(I, Q, centerHz, sampleRate);
+  }
+
   /** The HackRF stream is the active source (true) or the browser's (false). */
   setExternalMode(on: boolean): void {
     if (on === this.external) return;

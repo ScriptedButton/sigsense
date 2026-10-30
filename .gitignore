@@ -5,6 +5,7 @@ out/
 *.pyc
 __pycache__/
 .venv/
+.venv-worker/
 venv/
 *.egg-info/
 .pytest_cache/
@@ -21,3 +22,4 @@ data/radioml/
 .env.local
 *.log
 .turbo/
+.runtime/

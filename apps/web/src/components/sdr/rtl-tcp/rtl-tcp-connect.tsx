@@ -22,8 +22,15 @@ export function RtlTcpConnect({ align }: RtlTcpConnectProps) {
   const playing = state.status === "playing" || state.status === "starting";
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(RTL_SERVER_URL_STORAGE_KEY);
-    if (saved) setUrl(saved);
+    let saved: string | null = null;
+    try { saved = window.localStorage.getItem(RTL_SERVER_URL_STORAGE_KEY); } catch { /* Storage is optional. */ }
+    const localBridge = new URL(window.location.href);
+    localBridge.protocol = "http:";
+    localBridge.port = "8081";
+    localBridge.pathname = "/";
+    localBridge.search = "";
+    localBridge.hash = "";
+    setUrl(saved && saved !== DEFAULT_RTL_SERVER_URL ? saved : localBridge.origin);
   }, []);
 
   if (playing) return null;
@@ -44,7 +51,7 @@ export function RtlTcpConnect({ align }: RtlTcpConnectProps) {
   const submit = () => {
     const next = url.trim();
     if (!next) return;
-    window.localStorage.setItem(RTL_SERVER_URL_STORAGE_KEY, next);
+    try { window.localStorage.setItem(RTL_SERVER_URL_STORAGE_KEY, next); } catch { /* Connecting does not require browser storage. */ }
     void controller.connectRtlServer(next);
   };
 
@@ -66,7 +73,7 @@ export function RtlTcpConnect({ align }: RtlTcpConnectProps) {
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          placeholder="localhost:8081"
+          placeholder="Receiver server address"
           aria-label="RTL server address"
           onChange={(event) => setUrl(event.target.value)}
         />

@@ -1,0 +1,26 @@
+[Unit]
+Description=SigSense LAN GPU signal enhancement worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Example installation; adjust user and paths for the GPU machine.
+User=sigsense
+WorkingDirectory=/opt/sigsense
+Environment=PYTHONPATH=/opt/sigsense/apps/api
+Environment=TORCH_HOME=/var/cache/sigsense-processing
+Environment=OMP_NUM_THREADS=1
+EnvironmentFile=/etc/sigsense/processing-worker.env
+CacheDirectory=sigsense-processing
+ExecStart=/opt/sigsense/.venv-worker/bin/uvicorn sigsense_api.processing_worker:app --host 0.0.0.0 --port 8791 --workers 1 --ws-max-size 8192 --ws-max-queue 1 --timeout-keep-alive 5
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

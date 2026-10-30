@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 
+import type { SpectrumListener } from "@/lib/sdr/radio-controller";
 import { RadioController } from "@/lib/sdr/radio-controller";
 import type { FskState } from "@/lib/sdr/fsk/types";
 import { DEFAULT_FSK_CONFIG } from "@/lib/sdr/fsk/types";
@@ -35,8 +36,16 @@ import {
   wefaxLineWidth,
 } from "@/lib/sdr/wefax/types";
 import { DEFAULT_SAMPLE_RATE, type SdrState } from "@/lib/sdr/types";
+import { startReceiverControlClient } from "@/lib/sdr/receiver-control/browser-client";
+import { INITIAL_FINDER_STATE } from "@/lib/sdr/autofinder/engine";
 
 const ControllerContext = createContext<RadioController | null>(null);
+
+export function useAutofinderState() {
+  const controller = useRadioController();
+  return useSyncExternalStore((notify) => controller.subscribeAutofinder(notify),
+    () => controller.getAutofinderState(), () => INITIAL_FINDER_STATE);
+}
 
 /** Stable SSR snapshot — never reads browser APIs. */
 const SERVER_STATE: SdrState = {
@@ -47,6 +56,10 @@ const SERVER_STATE: SdrState = {
   sampleRate: DEFAULT_SAMPLE_RATE,
   scheme: "WBFM",
   volume: 0.8,
+  audioNoiseReduction: "off",
+  voiceIsolation: false,
+  voiceIsolationLoading: false,
+  audioEnhancementError: null,
   autoGain: true,
   gainDb: 20,
   bandwidthHz: 150_000,
@@ -69,7 +82,9 @@ export function SdrProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     controller.detectCapabilities();
     controller.restoreTranscriptionSettings();
+    const stopReceiverControl = startReceiverControlClient(controller);
     return () => {
+      stopReceiverControl();
       void controller.stop();
     };
   }, [controller]);
@@ -102,7 +117,8 @@ export function useSdrState(): SdrState {
 }
 
 export function useSpectrumStream(
-  onFrame: (spectrum: Float32Array, centerHz: number | undefined) => void,
+  onFrame: SpectrumListener,
+  display = false,
 ): void {
   const controller = useRadioController();
   const [ready, setReady] = useState(false);
@@ -113,8 +129,8 @@ export function useSpectrumStream(
 
   useEffect(() => {
     if (!ready) return;
-    return controller.onSpectrum(onFrame);
-  }, [controller, onFrame, ready]);
+    return controller.onSpectrum(onFrame, display);
+  }, [controller, onFrame, ready, display]);
 }
 
 const SERVER_TRANSCRIPTION: TranscriptionState = {

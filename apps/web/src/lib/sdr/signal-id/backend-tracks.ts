@@ -44,6 +44,10 @@ export function displayClassFor(label: string): DisplayClass {
     case "LSB":
     case "CW":
       return label;
+    case "SSB":
+      return "SSB";
+    case "Carrier":
+      return "CARRIER";
     case "Noise":
       return "NOISE";
     default:

@@ -61,7 +61,7 @@ class TrackerTests(unittest.TestCase):
         b = tracker.observe(self.observation(), now=2)
         self.assertEqual(a["id"], b["id"])
         c = tracker.observe({**self.observation(), "label": "AM"}, now=3)
-        self.assertNotEqual(a["id"], c["id"])
+        self.assertEqual(a["id"], c["id"])
         d = tracker.observe(self.observation(), now=20)
         self.assertNotEqual(a["id"], d["id"])
         self.assertEqual(b["observations"], 2)

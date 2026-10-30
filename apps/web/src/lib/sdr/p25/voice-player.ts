@@ -2,9 +2,11 @@
  * Plays IMBE PCM via Web Audio, independent of the NBFM AudioPlayer.
  */
 
+import { AudioEnhancer } from "../audio-enhancement";
 import { IMBE_SAMPLE_RATE } from "./imbe";
 
 export class P25VoicePlayer {
+  private enhancer = new AudioEnhancer();
   private ctx: AudioContext | null = null;
   private nextTime = 0;
   private volume = 0.85;
@@ -42,8 +44,9 @@ export class P25VoicePlayer {
 
     const buffer = ctx.createBuffer(1, pcm8k.length, IMBE_SAMPLE_RATE);
     const ch = buffer.getChannelData(0);
+    const enhanced = this.enhancer.process(pcm8k, IMBE_SAMPLE_RATE);
     for (let i = 0; i < pcm8k.length; i++) {
-      ch[i] = (pcm8k[i] ?? 0) * this.volume;
+      ch[i] = (enhanced[i] ?? 0) * this.volume;
     }
     const src = ctx.createBufferSource();
     src.buffer = buffer;
@@ -54,10 +57,12 @@ export class P25VoicePlayer {
   }
 
   reset(): void {
+    this.enhancer.reset();
     this.nextTime = this.ctx?.currentTime ?? 0;
   }
 
   dispose(): void {
+    this.enhancer.reset();
     void this.ctx?.close();
     this.ctx = null;
   }

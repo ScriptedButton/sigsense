@@ -83,6 +83,7 @@ export function TranscriptPanel() {
   const live = radio.status === "playing";
   const [preference, setPreference] = useState<EnginePreference>("auto");
   const [language, setLanguage] = useState("en");
+  const [task, setTask] = useState<"transcribe" | "translate">("transcribe");
   const [prompt, setPrompt] = useState("");
   const [copied, setCopied] = useState(false);
 
@@ -92,6 +93,7 @@ export function TranscriptPanel() {
       setPreference(controller.getTranscriptionPreference());
       const options = controller.getTranscriptionOptions();
       setLanguage(options.language);
+      setTask(options.task ?? "transcribe");
       setPrompt(options.prompt);
     };
     const id = requestAnimationFrame(sync);
@@ -117,7 +119,7 @@ export function TranscriptPanel() {
       case "listening":
         return tx.note ?? (server ? "Listening — transcribing on the server" : "Listening to demod audio");
       case "transcribing":
-        return "Transcribing…";
+        return task === "translate" ? "Translating into English…" : "Transcribing…";
       case "ready":
         return "Model ready";
       case "error":
@@ -130,7 +132,7 @@ export function TranscriptPanel() {
   const engineLabel = tx.enabled
     ? server
       ? `Server${tx.server ? ` · ${shortModel(tx.server.model)} · ${tx.server.gpu ? "GPU" : "CPU"}` : ""}`
-      : "On-device (tiny.en)"
+      : "On-device (multilingual tiny)"
     : null;
 
   const chooseEngine = (next: EnginePreference) => {
@@ -167,7 +169,7 @@ export function TranscriptPanel() {
           aria-pressed={tx.enabled}
           onClick={() => void controller.setTranscriptionEnabled(!tx.enabled)}
         >
-          {tx.enabled ? "Stop" : "Transcribe"}
+          {tx.enabled ? "Stop" : task === "translate" ? "Translate" : "Transcribe"}
         </button>
         <button type="button" className="btn-secondary" disabled={empty} onClick={() => controller.clearTranscript()}>
           Clear
@@ -179,20 +181,31 @@ export function TranscriptPanel() {
 
       <div className="stt-grid">
         <label className="stt-field">
-          <span>Engine</span>
-          <select value={preference} onChange={(e) => chooseEngine(e.target.value as EnginePreference)}>
-            <option value="auto">Auto (server first)</option>
-            <option value="server">Server (GPU) — recommended</option>
-            <option value="device">On-device (offline)</option>
+          <span>Output</span>
+          <select value={task} onChange={(e) => {
+            const next = e.target.value as "transcribe" | "translate";
+            setTask(next);
+            // Translation starts with language detection rather than assuming English audio.
+            if (next === "translate") setLanguage("auto");
+            controller.setTranscriptionOptions({ task: next, ...(next === "translate" ? { language: "auto" } : {}) });
+          }}>
+            <option value="transcribe">Transcribe in source language</option>
+            <option value="translate">Translate into English (on-device)</option>
           </select>
         </label>
         <label className="stt-field">
-          <span>Language</span>
+          <span>Engine</span>
+          <select value={task === "translate" ? "device" : preference} disabled={task === "translate"} onChange={(e) => chooseEngine(e.target.value as EnginePreference)}>
+            <option value="auto">Auto (server first)</option>
+            <option value="server">Server (GPU) — recommended</option>
+            <option value="device">On-device</option>
+          </select>
+        </label>
+        <label className="stt-field">
+          <span>Source language</span>
           <select
             value={language}
             onChange={(e) => chooseLanguage(e.target.value)}
-            disabled={preference === "device"}
-            title={preference === "device" ? "The on-device model is English only" : undefined}
           >
             {LANGUAGES.map((l) => (
               <option key={l.id} value={l.id}>
@@ -234,7 +247,7 @@ export function TranscriptPanel() {
           <p className="text-sm text-muted">
             {tx.enabled
               ? "Speech appears here as it is heard — grey text is still being refined."
-              : "Press Transcribe to turn the demodulated audio into text. Works best on clear voice (NBFM, AM, SSB); tune a voice channel first."}
+              : `Press ${task === "translate" ? "Translate" : "Transcribe"} to turn the demodulated audio into ${task === "translate" ? "English" : "text"}. Works best on clear voice (NBFM, AM, SSB); tune a voice channel first.`}
           </p>
         ) : (
           <>
@@ -268,7 +281,7 @@ export function TranscriptPanel() {
         )}
       </div>
 
-      <details className="stt-details">
+      <details className="stt-details" hidden={task === "translate"}>
         <summary>Vocabulary hints</summary>
         <p className="stt-help">
           Words the model should expect — callsigns, place names, jargon. Ten-codes, the phonetic alphabet and GMRS terms are
@@ -304,7 +317,7 @@ export function TranscriptPanel() {
       <p className="stt-help mt-2">
         {server
           ? "Audio is transcribed by a speech model running on your own SigSense server — nothing leaves your network."
-          : "On-device mode runs a small English Whisper model in this browser: slower and less accurate, but fully offline."}
+          : "On-device mode runs multilingual Whisper in this browser and can translate speech into English. Internet is needed to download model and runtime files; browser model caching requires HTTPS or localhost."}
       </p>
     </fieldset>
   );

@@ -1,0 +1,13 @@
+[Unit]
+Description=SigSense RTL-SDR receiver
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=cole
+ExecStart=/usr/bin/rtl_tcp -a 127.0.0.1 -p 1234
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

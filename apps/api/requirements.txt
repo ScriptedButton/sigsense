@@ -9,7 +9,8 @@ torchvision>=0.17
 faiss-cpu>=1.7
 pydantic>=2
 aiofiles>=23
-websockets>=12
+websockets>=15
+httpx>=0.27
 # Server-side speech-to-text (sigsense_api/stt.py). Pulls ctranslate2, onnxruntime
 # (Silero VAD), av and tokenizers; torch is not touched. Optional: the API starts
 # without it and /transcribe/status reports available=false.

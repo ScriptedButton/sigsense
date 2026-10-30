@@ -5,8 +5,9 @@
  * reach it only through loadDsp() so unsupported browsers still load the app.
  */
 import { Demodulator } from "@jtarrio/signals/demod/demodulator.js";
+import { registerDemod } from "@jtarrio/signals/demod/modes.js";
 import { SampleCounter } from "@jtarrio/signals/demod/sample-counter.js";
-import { Spectrum } from "@jtarrio/signals/demod/spectrum.js";
+import { StreamingSpectrum as Spectrum } from "./streaming-spectrum";
 import { CompositeReceiver } from "@jtarrio/signals/radio/sample_receiver.js";
 import {
   modulateAM,
@@ -27,6 +28,11 @@ import { createDemoP25Generator } from "./p25/demo-signal";
 import { createDemoWefaxBank } from "./wefax/demo-signal";
 import { wefaxDemoCarriersHz } from "./wefax/stations";
 import { DEMO_WEFAX_FREQUENCY_HZ } from "./wefax/types";
+import { HfAmConfig, HfAmDemod } from "./hf-am-demod";
+
+// Override the package AM implementation after demodulator.js registers its
+// defaults. Existing Demodulator instances then construct the HF-safe receiver.
+registerDemod("AM", HfAmDemod, HfAmConfig);
 
 export {
   CompositeReceiver,

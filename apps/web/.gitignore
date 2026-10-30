@@ -14,7 +14,8 @@
 /coverage
 
 # next.js
-/.next/
+# All build directories, including the active-build symlink.
+/.next*
 /out/
 
 # production

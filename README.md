@@ -35,11 +35,53 @@ Open http://localhost:3000
 
 **Receiver** is the browser RTL-SDR from [SDRSense](https://github.com/ScriptedButton/sdrsense): WebUSB, an `rtl_tcp` bridge, OpenWebRX+, WBFM/NBFM/AM/USB/LSB/CW, scanner, frequency lookup, shortwave schedule, Morse, RTTY, FT8, weatherfax, P25, in-browser transcription, and on-device signal identification. **Live SDR** stays the HackRF / SoapySDR path with BLE decode. Leaving Receiver stops that session.
 
+**Find speech automatically** in Radio or Stations starts the [autonomous HF finder](docs/autonomous-finder.md): no range or channel-list setup, local neural speech checks, automatic listening/reacquisition, and remembered signal cooldowns. The receiver page must stay open; speech activity is not a guarantee of intelligibility.
+
+**Background shortwave finder**, also in Radio and Stations, shows continuous service
+scan progress, saved speech detections, and recent signal checks. Pause/resume/skip
+controls manage the background search; **Listen live** transfers the receiver to
+your browser. Run `pnpm autofinder-service` or install the documented user service
+to scan while your browser is closed. Findings survive restarts and remain visible
+when the service is offline. See [setup and UI behavior](docs/autonomous-finder.md#background-findings-in-the-ui).
+
+The finder also runs an [adaptive backend cleaning pipeline](docs/adaptive-signal-cleaning.md):
+impulse/whistle rejection, local RNNoise, adaptive spectral suppression, measured
+RF corrections, and continuous speech-preserving profile selection. Cleaned audio
+plays automatically on the listening receiver; the UI provides a live original/
+cleaned comparison and shows optimization measurements.
+
+An optional [LAN GPU processing worker](docs/lan-gpu-processing.md) offloads heavier
+streaming neural enhancement to another machine. Radio ownership stays local;
+authenticated audio transport, measured latency, UI GPU/CPU status and automatic
+local fallback/recovery are built into the cleaner.
+
 ```bash
 # RTL stick on another machine, then:
 pnpm rtl-server
 # optional: pnpm rtl-server -- --listen 8081 --tcp 127.0.0.1:1234
 ```
+
+To share a receiver with another SDR++ instance, install
+[SDR++](https://www.sdrpp.org/) on the machine with the radio, then run:
+
+```bash
+pnpm sdrpp-server                         # listens on 127.0.0.1:5259
+SDRPP_ADDR=0.0.0.0 pnpm sdrpp-server       # allow connections over the LAN
+# Optional environment overrides: SDRPP_BIN=/path/to/sdrpp SDRPP_PORT=5259
+pnpm sdrpp-server -- --root /path/to/sdrpp-config
+```
+
+In the SDR++ client, select **SDR++ Server** and enter the server machine's
+address and port. This uses the native SDR++ protocol; the browser Receiver's
+`rtl_tcp` bridge still uses `pnpm rtl-server`. Additional arguments are forwarded
+to SDR++; see the [SDR++ user guide](https://www.sdrpp.org/manual.pdf) for server setup.
+Run `pnpm sdrpp-server --help` for helper options.
+
+For direct agent inspection/control of the browser receiver, see
+[Receiver MCP setup](docs/receiver-mcp.md). Run `pnpm receiver-control` for the
+authenticated browser broker and `pnpm receiver-mcp` for the stdio MCP server.
+The tools expose live state, tuning, gain, spectrum, raw/playback audio, native IQ,
+signal discovery, schedules, display settings, and playback diagnostics.
 
 P25 clear-voice synthesis uses a WebAssembly build of [mbelib](https://github.com/szechyjs/mbelib). Executable objects derived from that package may be covered by patents; see `apps/web/src/lib/sdr/p25/vendor/mbe/PATENT-NOTICE.md`. Metadata decode does not require the vocoder.
 

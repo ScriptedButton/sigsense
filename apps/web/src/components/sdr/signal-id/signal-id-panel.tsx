@@ -138,8 +138,8 @@ export function SignalIdPanel() {
         {scan.source === "offline-fallback"
           ? "Classifying with the small on-device model until the backend is reachable again. "
           : radio.connection === "hackrf"
-            ? "The backend CNN classifies each occupied band from the HackRF's IQ, checks the open-set library, and tags licensed channels from the band plan. "
-            : "The backend CNN classifies each occupied band in the spectrum rows, checks the open-set library, and tags licensed channels from the band plan. Labels come from averaged FFT rows, not raw IQ, so treat them as hints. "}
+            ? "Modulation families are identified from the HackRF's raw IQ. Licensed channels are separate frequency hints. "
+            : "RTL sources use raw IQ to identify modulation families. Remote receivers use spectrum rows. Exact protocols require decoder evidence; uncertain results stay unknown. "}
         Matches are then checked against a {CATALOG_COUNT.toLocaleString()}
         -entry signal catalog. Select a signal to tune it and switch the
         demodulator to match.

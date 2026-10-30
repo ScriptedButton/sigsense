@@ -21,6 +21,8 @@ import {
   viewSpanHz,
 } from "@/lib/sdr/spectrum-viewport";
 import { dbRangeFor, type DbRangeId, type NoiseFilterId } from "@/lib/sdr/display-settings";
+import type { SpectrumFrameInfo } from "@/lib/sdr/streaming-spectrum";
+import { SpectrumDisplayLevels } from "@/lib/sdr/spectrum-display-levels";
 import { SpectrumNoiseFilter } from "@/lib/sdr/spectrum-noise-filter";
 
 type SpectrumScopeProps = {
@@ -34,6 +36,8 @@ type SpectrumScopeProps = {
   onCenterOnOffset: (offsetHz: number) => void;
   onPanLo: (deltaHz: number) => void;
   dbRange: DbRangeId;
+  floorOffsetDb?: number;
+  rangeDb?: number;
   noiseFilter?: NoiseFilterId;
   /** Identified signals to annotate over the trace. */
   markers?: SignalMarker[];
@@ -51,6 +55,8 @@ export function SpectrumScope({
   onCenterOnOffset,
   onPanLo,
   dbRange,
+  floorOffsetDb = -2,
+  rangeDb = 32,
   noiseFilter = "off",
   markers,
   onMarkerCorrect,
@@ -68,6 +74,11 @@ export function SpectrumScope({
   const noiseFilterRef = useRef(new SpectrumNoiseFilter());
   const noiseStrengthRef = useRef(noiseFilter);
   const dbRef = useRef(dbRangeFor(dbRange));
+  const autoRef = useRef(dbRange === "auto");
+  const floorOffsetRef = useRef(floorOffsetDb);
+  const rangeRef = useRef(rangeDb);
+  const sourceInfoRef = useRef<SpectrumFrameInfo | undefined>(undefined);
+  const levelsRef = useRef(new SpectrumDisplayLevels());
   const sampleRateRef = useRef(sampleRate);
   const frequencyRef = useRef(frequencyHz);
   const offsetRef = useRef(offsetHz);
@@ -79,13 +90,16 @@ export function SpectrumScope({
   useEffect(() => {
     markersRef.current = markers ?? [];
     noiseStrengthRef.current = noiseFilter;
-    dbRef.current = dbRangeFor(dbRange);
+    autoRef.current = dbRange === "auto";
+    floorOffsetRef.current = floorOffsetDb;
+    rangeRef.current = rangeDb;
+    if (!autoRef.current) dbRef.current = dbRangeFor(dbRange);
     sampleRateRef.current = sampleRate;
     frequencyRef.current = frequencyHz;
     offsetRef.current = offsetHz;
     bandwidthRef.current = bandwidthHz;
     dirtyRef.current = true;
-  }, [bandwidthHz, frequencyHz, offsetHz, sampleRate, dbRange, markers, noiseFilter]);
+  }, [bandwidthHz, frequencyHz, offsetHz, sampleRate, dbRange, floorOffsetDb, rangeDb, markers, noiseFilter]);
 
   // Pans, zooms and inertia arrive here at display rate.
   useEffect(() => store.subscribe(() => {
@@ -221,14 +235,18 @@ export function SpectrumScope({
     const denom = Math.max(width - 1, 1);
     // Bins per pixel: above 1 the trace takes each pixel's peak so narrow
     // carriers (GMRS, CW) are never skipped between samples.
-    const binsPerPx = (span / rate) * (n - 1) / denom;
+    const sourceRate = sourceInfoRef.current?.sampleRate ?? rate;
+    const sourceOffset = sourceInfoRef.current?.centerOffsetHz ?? 0;
+    const binsPerPx = (span / sourceRate) * n / denom;
     for (let px = 0; px < width; px++) {
       const offsetAtX = leftOffset + (px / denom) * span;
-      const frac = offsetAtX / rate + 0.5;
-      const binFloat = frac * (n - 1);
+      const frac = (offsetAtX - sourceOffset) / sourceRate + 0.5;
+      const binFloat = Math.min(n - 1, frac * n);
       const i0 = Math.floor(binFloat);
       let dbRaw: number;
-      if (binsPerPx > 1.2) {
+      if (frac < 0 || frac >= 1) {
+        dbRaw = minDb;
+      } else if (binsPerPx > 1.2) {
         const lo = Math.max(0, Math.round(binFloat - binsPerPx / 2));
         const hi = Math.min(n - 1, Math.round(binFloat + binsPerPx / 2));
         dbRaw = -Infinity;
@@ -278,11 +296,17 @@ export function SpectrumScope({
   }, [draw]);
 
   useSpectrumStream(
-    useCallback((spectrum, centerHz) => {
+    useCallback((spectrum, centerHz, info) => {
+      sourceInfoRef.current = info;
       const filtered = noiseFilterRef.current.apply(
         spectrum,
         noiseStrengthRef.current,
       );
+      if (autoRef.current) {
+        const levels = levelsRef.current.update(filtered);
+        const minDb = levels.minDb + floorOffsetRef.current;
+        dbRef.current = { minDb, maxDb: minDb + rangeRef.current };
+      }
       if (!latestRef.current || latestRef.current.length !== filtered.length) {
         latestRef.current = new Float32Array(filtered.length);
       }
@@ -290,6 +314,7 @@ export function SpectrumScope({
       centerRef.current = centerHz;
       dirtyRef.current = true;
     }, []),
+    true,
   );
 
   const navHandlers: SpectrumNavHandlers = {

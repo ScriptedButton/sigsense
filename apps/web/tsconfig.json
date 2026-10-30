@@ -48,7 +48,15 @@
     ".next-learn/types/**/*.ts",
     ".next-learn/dev/types/**/*.ts",
     ".next-dv/types/**/*.ts",
-    ".next-dv/dev/types/**/*.ts"
+    ".next-dv/dev/types/**/*.ts",
+    ".next-stt-build/types/**/*.ts",
+    ".next-stt-build/dev/types/**/*.ts",
+    ".next-deploy/types/**/*.ts",
+    ".next-deploy/dev/types/**/*.ts",
+    ".next-service-finder/types/**/*.ts",
+    ".next-service-finder/dev/types/**/*.ts",
+    ".next-prod-lan-worker-20261030/types/**/*.ts",
+    ".next-prod-lan-worker-20261030/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

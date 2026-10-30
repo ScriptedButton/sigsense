@@ -1,0 +1,16 @@
+[Unit]
+Description=SigSense continuous real-signal shortwave finder
+After=network.target sigsense-receiver-control.service sigsense-receiver-browser.service
+Wants=sigsense-receiver-control.service sigsense-receiver-browser.service
+
+[Service]
+WorkingDirectory=/home/cole/sigsense/apps/web
+Environment=PATH=/home/cole/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SIGSENSE_AUTOFINDER_RTL_URL=http://127.0.0.1:8081
+ExecStart=/home/cole/.local/bin/pnpm autofinder-service
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target

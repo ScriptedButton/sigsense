@@ -1,0 +1,100 @@
+{
+  "scope": "synthetic IQ rendered at receiver FFT resolutions; not a captured RF benchmark",
+  "seed": 2731,
+  "classes": [
+    "AM",
+    "NFM",
+    "WFM",
+    "SSB",
+    "FSK",
+    "Digital",
+    "Carrier",
+    "Noise"
+  ],
+  "test_count": 1000,
+  "accuracy": 0.905,
+  "accepted_065": 0.911,
+  "accepted_accuracy_065": 0.9484083424807903,
+  "confusion": [
+    [
+      108,
+      2,
+      0,
+      8,
+      0,
+      0,
+      7,
+      0
+    ],
+    [
+      0,
+      103,
+      0,
+      0,
+      22,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      124,
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    [
+      4,
+      1,
+      0,
+      118,
+      2,
+      0,
+      0,
+      0
+    ],
+    [
+      6,
+      19,
+      0,
+      3,
+      94,
+      0,
+      2,
+      1
+    ],
+    [
+      1,
+      0,
+      0,
+      0,
+      1,
+      121,
+      0,
+      2
+    ],
+    [
+      6,
+      0,
+      0,
+      0,
+      0,
+      0,
+      119,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      0,
+      5,
+      1,
+      0,
+      118
+    ]
+  ]
+}

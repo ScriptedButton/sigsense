@@ -5,23 +5,20 @@ import {
   useSdrState,
 } from "@/components/sdr/sdr-provider";
 
-const SW_AM_BANDWIDTH_HZ = 10_000;
+const SW_AM_BANDWIDTH_HZ = 6_000;
 
-/** Tune AM to a shortwave broadcast frequency; start demo if idle. */
+/** Tune a broadcast on the selected receiver; disconnected tuning sets the dial. */
 export function useTuneShortwave() {
   const controller = useRadioController();
   const radio = useSdrState();
 
   return (frequencyHz: number) => {
-    const needsRf =
-      radio.connection === "disconnected" ||
-      radio.status === "idle" ||
-      radio.status === "error";
-
-    controller.setScheme("AM");
-    controller.setBandwidth(SW_AM_BANDWIDTH_HZ);
-    void controller.setFrequency(frequencyHz);
-    controller.setOffset(0);
-    if (needsRf) void controller.connectDemo();
+    if (radio.scheme !== "AM") {
+      controller.setScheme("AM");
+      controller.setBandwidth(SW_AM_BANDWIDTH_HZ);
+    }
+    controller.setAutoSquelch(false);
+    controller.setSquelch(0);
+    controller.tuneToHz(frequencyHz);
   };
 }

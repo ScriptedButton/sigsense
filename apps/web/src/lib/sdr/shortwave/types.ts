@@ -76,3 +76,11 @@ export type ShortwaveLive = {
   /** Minutes until end (null if not on air). */
   endsInMin: number | null;
 };
+
+/** One listenable RF channel, potentially carrying several schedule rows. */
+export type ShortwaveChannel = {
+  frequencyHz: number;
+  broadcasts: ShortwaveLive[];
+  primary: ShortwaveLive;
+  onAir: boolean;
+};

@@ -40,6 +40,8 @@ import {
   useWefaxState,
 } from "@/components/sdr/sdr-provider";
 import { ShortwaveExplorer } from "@/components/sdr/shortwave/shortwave-explorer";
+import { AutofinderPanel } from "@/components/sdr/shortwave/autofinder-panel";
+import { ServiceFinderPanel } from "@/components/sdr/shortwave/service-finder-panel";
 import { SignalIdPanel } from "@/components/sdr/signal-id/signal-id-panel";
 import { TranscriptPanel } from "@/components/sdr/transcript-panel";
 import { WefaxPanel } from "@/components/sdr/wefax/wefax-panel";
@@ -57,7 +59,7 @@ type ControlRailProps = {
   onFreqFormatChange: (id: FreqFormatId) => void;
 };
 
-type MainTab = "radio" | "decode" | "identify" | "bluetooth";
+type MainTab = "radio" | "stations" | "decode" | "identify" | "bluetooth";
 type DecodeTab = "morse" | "fsk" | "ft8" | "wefax" | "trunk" | "digital" | "speech";
 type IdentifyTab = "signals" | "frequency" | "callsign";
 
@@ -177,6 +179,7 @@ export function ControlRail({
           }}
           tabs={[
             { id: "radio", label: "Radio", badge: scannerActive },
+            { id: "stations", label: "Stations" },
             {
               id: "decode",
               label: "Decode",
@@ -204,6 +207,8 @@ export function ControlRail({
               className="control-rail-stack"
             >
               <MobileDock />
+              <AutofinderPanel />
+              <ServiceFinderPanel />
               <FrequencyControl
                 freqTarget={freqTarget}
                 freqFormat={freqFormat}
@@ -218,8 +223,18 @@ export function ControlRail({
               <AudioGainControl />
               <GmrsChannelPresets />
               <ScannerPanel />
-              <ShortwaveExplorer />
               <HelpCard supported={state.webUsbSupported} />
+            </div>
+          )}
+
+          {mainTab === "stations" && (
+            <div
+              role="tabpanel"
+              id="rail-panel-stations"
+              aria-labelledby="rail-tab-stations"
+              className="control-rail-stack"
+            >
+              <ShortwaveExplorer />
             </div>
           )}
 

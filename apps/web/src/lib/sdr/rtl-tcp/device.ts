@@ -17,6 +17,9 @@ import {
   RTL_TCP_SET_GAIN_MODE,
   RTL_TCP_SET_SAMPLE_RATE,
 } from "./protocol";
+import { RfLevelController, analyzeUnsignedIq, type RfLevelMetrics } from "../rf-level-control";
+
+type RfLevelListener = (metrics: RfLevelMetrics, gainDb: number | null) => void;
 
 type PendingRead = {
   bytesNeeded: number;
@@ -36,16 +39,19 @@ export class RtlTcpDevice implements RtlDevice {
   private headerBuf: Uint8Array = new Uint8Array(0);
   private chunks: Uint8Array[] = [];
   private bufferedBytes = 0;
-  private pending: PendingRead | null = null;
+  private pending: PendingRead[] = [];
 
   private sampleRate = 1_024_000;
   private frequency = 88_500_000;
   private gain: number | null = null;
+  private automaticGainRequested = true;
+  private rfLevels = new RfLevelController();
+  private lastRfCheck = -Infinity;
   private ppm = 0;
   private directSamplingMethod = DirectSampling.Off;
   private biasTee = false;
 
-  constructor(private readonly wsUrl: string) {}
+  constructor(private readonly wsUrl: string, private readonly onRfLevels?: RfLevelListener) {}
 
   async open(): Promise<void> {
     if (this.ws) return;
@@ -124,10 +130,7 @@ export class RtlTcpDevice implements RtlDevice {
   private onSocketClosed(reason: string): void {
     this.ws = null;
     const err = new Error(`RTL server disconnected: ${reason}`);
-    if (this.pending) {
-      this.pending.reject(err);
-      this.pending = null;
-    }
+    for (const pending of this.pending.splice(0)) pending.reject(err);
     if (!this.closed) {
       this.closed = true;
     }
@@ -152,10 +155,7 @@ export class RtlTcpDevice implements RtlDevice {
         );
         this.headerError = err;
         void this.close();
-        if (this.pending) {
-          this.pending.reject(err);
-          this.pending = null;
-        }
+        for (const pending of this.pending.splice(0)) pending.reject(err);
         return;
       }
 
@@ -177,12 +177,12 @@ export class RtlTcpDevice implements RtlDevice {
   }
 
   private fulfillPending(): void {
-    const pending = this.pending;
-    if (!pending) return;
-    if (this.bufferedBytes < pending.bytesNeeded) return;
-
-    this.pending = null;
-    pending.resolve(this.takeBytes(pending.bytesNeeded));
+    while (this.pending.length > 0) {
+      const pending = this.pending[0]!;
+      if (this.bufferedBytes < pending.bytesNeeded) return;
+      this.pending.shift();
+      pending.resolve(this.takeBytes(pending.bytesNeeded));
+    }
   }
 
   private takeBytes(n: number): ArrayBuffer {
@@ -230,7 +230,17 @@ export class RtlTcpDevice implements RtlDevice {
   }
 
   async setGain(gain: number | null): Promise<void> {
+    this.automaticGainRequested = gain === null;
     if (gain == null) {
+      // Tuner AGC railed >3% of samples on the live V4 HF capture. Start
+      // with headroom and let measured ADC levels control the tuner instead.
+      if (this.frequency < 30_000_000) {
+        this.sendCommand(RTL_TCP_SET_GAIN_MODE, 1);
+        this.sendCommand(RTL_TCP_SET_GAIN, 0);
+        this.gain = 0;
+        this.rfLevels = new RfLevelController();
+        return;
+      }
       this.sendCommand(RTL_TCP_SET_GAIN_MODE, 0);
       this.gain = null;
       return;
@@ -247,8 +257,10 @@ export class RtlTcpDevice implements RtlDevice {
 
   async setCenterFrequency(freq: number): Promise<number> {
     const next = Math.floor(freq);
+    const enteringHf = next < 30_000_000 && this.frequency >= 30_000_000;
     this.sendCommand(RTL_TCP_SET_FREQ, next);
     this.frequency = next;
+    if (enteringHf && this.automaticGainRequested) await this.setGain(null);
     return next;
   }
 
@@ -282,13 +294,25 @@ export class RtlTcpDevice implements RtlDevice {
     }
     const bytesNeeded = length * 2;
     const data = await new Promise<ArrayBuffer>((resolve, reject) => {
-      if (this.pending) {
-        reject(new Error("Overlapping readSamples calls."));
-        return;
-      }
-      this.pending = { bytesNeeded, resolve, reject };
+      // The radio engine pipelines multiple reads; fulfill them in FIFO order.
+      this.pending.push({ bytesNeeded, resolve, reject });
       this.fulfillPending();
     });
+
+    const now = performance.now();
+    if (this.frequency < 30_000_000 && now - this.lastRfCheck >= 250) {
+      this.lastRfCheck = now;
+      const raw = new Uint8Array(data);
+      const recommendation = this.automaticGainRequested
+        ? this.rfLevels.observe(raw, this.gain ?? 20, this.gain === null, now)
+        : null;
+      if (recommendation) {
+        this.sendCommand(RTL_TCP_SET_GAIN_MODE, 1);
+        this.sendCommand(RTL_TCP_SET_GAIN, Math.round(recommendation.gainDb * 10));
+        this.gain = recommendation.gainDb;
+      }
+      this.onRfLevels?.(recommendation?.metrics ?? analyzeUnsignedIq(raw), this.gain);
+    }
 
     return {
       frequency: this.frequency,
@@ -299,9 +323,8 @@ export class RtlTcpDevice implements RtlDevice {
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.pending) {
-      this.pending.reject(new Error("RTL server closed."));
-      this.pending = null;
+    for (const pending of this.pending.splice(0)) {
+      pending.reject(new Error("RTL server closed."));
     }
     this.chunks = [];
     this.bufferedBytes = 0;
@@ -314,10 +337,10 @@ export class RtlTcpDevice implements RtlDevice {
 }
 
 export class RtlTcpDeviceProvider implements RtlDeviceProvider {
-  constructor(private readonly wsUrl: string) {}
+  constructor(private readonly wsUrl: string, private readonly onRfLevels?: RfLevelListener) {}
 
   async get(): Promise<RtlDevice> {
-    const device = new RtlTcpDevice(this.wsUrl);
+    const device = new RtlTcpDevice(this.wsUrl, this.onRfLevels);
     await device.open();
     return device;
   }

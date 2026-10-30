@@ -4,9 +4,12 @@
  */
 
 import {
+  adjacentBroadcastFrequency,
   daysMatch,
   eibiWeekday,
   filterSchedule,
+  firstBroadcastFrequencyForBand,
+  groupBroadcastChannels,
   lookupAtFrequency,
   timeInWindow,
   utcMinuteNow,
@@ -59,7 +62,6 @@ assert(
   english31.every((x) => x.entry.f >= 9400 && x.entry.f <= 9900),
   "31m band",
 );
-
 const bbc = filterSchedule(
   schedule.entries as ShortwaveEntry[],
   { when: "all", bandId: null, language: null, query: "bbc" },
@@ -78,6 +80,35 @@ assert(
   "lookup within tolerance",
 );
 assert(atFreq[0].onAir, "lookup prefers on-air");
+
+for (const query of ["English", "9.420 MHz", "9420 kHz"]) {
+  assert(filterSchedule([sample], { when: "all", bandId: null, language: null, query }, now).length === 1,
+    `search supports human language names and frequency units: ${query}`);
+}
+
+const navigationRows = [
+  { ...atFreq[0], frequencyHz: 5_900_000 },
+  { ...atFreq[0], frequencyHz: 5_900_000 },
+  { ...atFreq[0], frequencyHz: 5_950_000 },
+  { ...atFreq[0], frequencyHz: 6_000_000 },
+];
+const grouped = groupBroadcastChannels(navigationRows, 5_960_000, "nearest");
+assert(grouped.length === 3, "duplicate schedule rows collapse into channels");
+assert(grouped[0].frequencyHz === 5_950_000, "nearest channel sorts first");
+assert(grouped.find((row) => row.frequencyHz === 5_900_000)?.broadcasts.length === 2, "channel preserves all broadcasts");
+assert(firstBroadcastFrequencyForBand(schedule.entries as ShortwaveEntry[], "31m", now) !== null, "band browse finds a scheduled channel");
+assert(
+  adjacentBroadcastFrequency(navigationRows, 5_900_000, 1) === 5_950_000,
+  "next navigation skips duplicate frequencies",
+);
+assert(
+  adjacentBroadcastFrequency(navigationRows, 5_975_000, -1) === 5_950_000,
+  "previous navigation selects the closest lower frequency",
+);
+assert(
+  adjacentBroadcastFrequency(navigationRows, 6_000_000, 1) === null,
+  "next navigation stops at the visible result boundary",
+);
 
 const empty = lookupAtFrequency(
   schedule.entries as ShortwaveEntry[],

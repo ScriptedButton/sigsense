@@ -1,19 +1,23 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import { ShortwaveRow } from "@/components/sdr/shortwave/shortwave-row";
-import type { ShortwaveLive } from "@/lib/sdr/shortwave/types";
+import type { ShortwaveChannel } from "@/lib/sdr/shortwave/types";
 
 type ShortwaveListProps = {
-  items: readonly ShortwaveLive[];
+  items: readonly ShortwaveChannel[];
   onTune: (frequencyHz: number) => void;
-  limit?: number;
+  pageSize?: number;
 };
 
 export function ShortwaveList({
   items,
   onTune,
-  limit = 80,
+  pageSize = 40,
 }: ShortwaveListProps) {
+  const [visibleCount, setVisibleCount] = useState(pageSize);
+  useEffect(() => setVisibleCount(pageSize), [items, pageSize]);
   if (items.length === 0) {
     return (
       <p className="sw-empty text-[0.7rem] leading-relaxed text-muted">
@@ -23,24 +27,28 @@ export function ShortwaveList({
     );
   }
 
-  const shown = items.slice(0, limit);
+  const shown = items.slice(0, visibleCount);
   const remaining = items.length - shown.length;
 
   return (
     <div className="sw-list-wrap">
       <ul className="sw-list" aria-label="Shortwave broadcasts">
-        {shown.map((live) => (
+        {shown.map((channel) => (
           <ShortwaveRow
-            key={`${live.entry.f}-${live.entry.a}-${live.entry.b}-${live.entry.n}-${live.entry.l}-${live.entry.s}`}
-            live={live}
+            key={channel.frequencyHz}
+            channel={channel}
             onTune={onTune}
           />
         ))}
       </ul>
       {remaining > 0 && (
-        <p className="mt-1 text-[0.65rem] text-muted">
-          Showing {shown.length} of {items.length} — refine filters to narrow.
-        </p>
+        <button
+          type="button"
+          className="sw-nav-button m-1 w-[calc(100%-0.5rem)]"
+          onClick={() => setVisibleCount((count) => count + pageSize)}
+        >
+          Show {Math.min(pageSize, remaining)} more channels · {remaining} remaining
+        </button>
       )}
     </div>
   );

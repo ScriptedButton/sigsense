@@ -35,6 +35,9 @@ from sigsense_api.sdr import LiveSDRService
 from sigsense_api.signal_store import SignalStore
 from sigsense_api.upconverters import UPCONVERTERS
 from sigsense_api.feedback_routes import build_router as build_feedback_router
+from sigsense_api.autofinder import router as autofinder_router
+from sigsense_api.audio_cleaner import router as audio_cleaner_router
+from sigsense_api.kiwi_diversity import router as kiwi_diversity_router
 from sigsense_api.spectrum_bands import (
     SpectrumPayloadError,
     SpectrumSessions,
@@ -89,6 +92,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="SigSense API", version="0.1.0", lifespan=lifespan)
+app.include_router(autofinder_router)
+app.include_router(audio_cleaner_router)
+app.include_router(kiwi_diversity_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -565,6 +571,49 @@ async def analyze_spectrum_bands(body: SpectrumBandsRequest) -> dict:
         finally:
             entry["busy"].release()
 
+    return await asyncio.to_thread(work)
+
+
+class IqBandsRequest(BaseModel):
+    session: str = Field(min_length=1, max_length=128)
+    center_freq_hz: float = Field(ge=0, lt=1e12)
+    sample_rate_hz: float = Field(gt=0, lt=1e10)
+    data: str = Field(max_length=400_000)
+    sensitivity_db: float = Field(default=10.0, ge=3, le=40)
+
+
+@app.post("/analyze/iq-bands")
+async def analyze_iq_bands(body: IqBandsRequest) -> dict:
+    """Identify browser receiver IQ before display averaging destroys its detail."""
+    import asyncio
+    import base64
+    try:
+        raw = base64.b64decode(body.data, validate=True)
+    except Exception as exc:
+        raise HTTPException(400, "data is not valid base64") from exc
+    if len(raw) % 4 or not 4096 * 4 <= len(raw) <= 65536 * 4:
+        raise HTTPException(400, "expected 4096–65536 interleaved int16 IQ samples")
+    pairs = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, 2) / 32767.0
+    iq = pairs[:, 0] + 1j * pairs[:, 1]
+    eng = get_engine()
+    entry = spectrum_sessions.get(body.session)
+    if not entry["busy"].acquire(blocking=False):
+        return {"type": "spectrum_bands", "busy": True}
+
+    def work():
+        try:
+            fft = min(4096, len(iq))
+            window = np.hanning(fft)
+            blocks = iq[:len(iq) // fft * fft].reshape(-1, fft)
+            power = np.abs(np.fft.fftshift(np.fft.fft(blocks * window, axis=1), axes=1)) ** 2 / window.sum() ** 2
+            rows = (10 * np.log10(power + 1e-20)).astype(np.float32)
+            result = analyze_spectrum_rows(eng, entry, rows, body.center_freq_hz, body.sample_rate_hz, body.sensitivity_db)
+            result["approximation"] = "RF modulation families from raw receiver IQ; exact protocols require decoder evidence."
+            for track in result["tracks"]:
+                track["evidence"] = track.get("evidence", "").replace("on spectrum rows", "on raw IQ")
+            return result
+        finally:
+            entry["busy"].release()
     return await asyncio.to_thread(work)
 
 

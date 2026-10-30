@@ -18,6 +18,7 @@ import {
   type WaterfallPaletteId,
   type WaterfallSpeedId,
 } from "@/lib/sdr/display-settings";
+import { SpectrumDisplayLevels, SpectrumRowAverage } from "@/lib/sdr/spectrum-display-levels";
 import { SpectrumNoiseFilter } from "@/lib/sdr/spectrum-noise-filter";
 import {
   offsetHzToX,
@@ -39,6 +40,8 @@ type WaterfallDisplayProps = {
   speed: WaterfallSpeedId;
   direction: WaterfallDirectionId;
   dbRange: DbRangeId;
+  floorOffsetDb?: number;
+  rangeDb?: number;
   noiseFilter?: NoiseFilterId;
 };
 
@@ -55,6 +58,9 @@ type RowRing = {
   capacity: number;
   data: Float32Array;
   rates: Float64Array;
+  centers: Float64Array;
+  minDb: Float32Array;
+  maxDb: Float32Array;
   head: number;
   count: number;
 };
@@ -69,15 +75,21 @@ function createRing(n: number): RowRing {
     capacity,
     data: new Float32Array(capacity * n),
     rates: new Float64Array(capacity),
+    centers: new Float64Array(capacity),
+    minDb: new Float32Array(capacity),
+    maxDb: new Float32Array(capacity),
     head: 0,
     count: 0,
   };
 }
 
-function pushRow(ring: RowRing, row: Float32Array, rate: number): void {
+function pushRow(ring: RowRing, row: Float32Array, rate: number, levels: { minDb: number; maxDb: number }, centerOffsetHz = 0): void {
   const slot = ring.head;
   ring.data.set(row, slot * ring.n);
   ring.rates[slot] = rate;
+  ring.centers[slot] = centerOffsetHz;
+  ring.minDb[slot] = levels.minDb;
+  ring.maxDb[slot] = levels.maxDb;
   ring.head = (slot + 1) % ring.capacity;
   if (ring.count < ring.capacity) ring.count++;
 }
@@ -114,6 +126,8 @@ export function WaterfallDisplay({
   speed,
   direction,
   dbRange,
+  floorOffsetDb = -2,
+  rangeDb = 32,
   noiseFilter = "off",
 }: WaterfallDisplayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -124,6 +138,8 @@ export function WaterfallDisplay({
   const needFullRef = useRef(true);
   const pendingRowsRef = useRef(0);
   const frameSkipRef = useRef(0);
+  const sourceKeyRef = useRef("");
+  const sequenceRef = useRef(-1);
   const accumRef = useRef<Float32Array | null>(null);
   const hasAccumRef = useRef(false);
   const rafRef = useRef(0);
@@ -137,6 +153,11 @@ export function WaterfallDisplay({
   const speedRef = useRef(speed);
   const directionRef = useRef(direction);
   const dbRef = useRef(dbRangeFor(dbRange));
+  const autoRef = useRef(dbRange === "auto");
+  const floorOffsetRef = useRef(floorOffsetDb);
+  const rangeRef = useRef(rangeDb);
+  const [levelsEngine] = useState(() => new SpectrumDisplayLevels());
+  const [rowAverage] = useState(() => new SpectrumRowAverage());
   // HackRF frames arrive at a few per second, so every one is a waterfall row.
   const sparseSource = useSdrState().connection === "hackrf";
   const sparseRef = useRef(sparseSource);
@@ -150,16 +171,20 @@ export function WaterfallDisplay({
     rate: -1,
     zoom: -1,
     center: NaN,
+    sourceCenter: NaN,
+    captureRate: NaN,
   });
 
   const rebuildMap = useCallback(
-    (width: number, n: number, rate: number): void => {
+    (width: number, n: number, rate: number, sourceCenter: number): void => {
       const vp = store.get();
       const key = mapKeyRef.current;
       if (
         key.width === width &&
         key.n === n &&
         key.rate === rate &&
+        key.sourceCenter === sourceCenter &&
+        key.captureRate === sampleRateRef.current &&
         key.zoom === vp.zoom &&
         key.center === vp.centerOffsetHz
       ) {
@@ -168,6 +193,8 @@ export function WaterfallDisplay({
       key.width = width;
       key.n = n;
       key.rate = rate;
+      key.sourceCenter = sourceCenter;
+      key.captureRate = sampleRateRef.current;
       key.zoom = vp.zoom;
       key.center = vp.centerOffsetHz;
       if (mapLoRef.current.length !== width) {
@@ -176,20 +203,20 @@ export function WaterfallDisplay({
       }
       const lo = mapLoRef.current;
       const hi = mapHiRef.current;
-      const span = viewSpanHz(rate, vp.zoom);
+      const span = viewSpanHz(sampleRateRef.current, vp.zoom);
       const leftOffset = vp.centerOffsetHz - span / 2;
       const denom = Math.max(width - 1, 1);
       // Above ~1 bin per pixel take each column's peak so narrow carriers
       // survive zooming out instead of falling between samples.
-      const binsPerPx = ((span / rate) * (n - 1)) / denom;
+      const binsPerPx = ((span / rate) * n) / denom;
       for (let x = 0; x < width; x++) {
-        const frac = (leftOffset + (x / denom) * span) / rate + 0.5;
+        const frac = (leftOffset + (x / denom) * span - sourceCenter) / rate + 0.5;
         if (frac < 0 || frac > 1) {
           lo[x] = -1; // outside what this row captured
           hi[x] = -1;
           continue;
         }
-        const bin = frac * (n - 1);
+        const bin = Math.min(n - 1, frac * n);
         if (binsPerPx > 1.2) {
           lo[x] = Math.max(0, Math.round(bin - binsPerPx / 2));
           hi[x] = Math.min(n - 1, Math.round(bin + binsPerPx / 2));
@@ -215,11 +242,13 @@ export function WaterfallDisplay({
       const n = ring.n;
       const half = n >> 1;
       const offset = slot * n;
-      rebuildMap(width, n, ring.rates[slot]);
+      rebuildMap(width, n, ring.rates[slot], ring.centers[slot]);
       const lo = mapLoRef.current;
       const hi = mapHiRef.current;
       const lut = lutRef.current;
-      const { minDb, maxDb } = dbRef.current;
+      const { minDb, maxDb } = autoRef.current
+        ? { minDb: ring.minDb[slot] + floorOffsetRef.current, maxDb: ring.minDb[slot] + floorOffsetRef.current + rangeRef.current }
+        : dbRef.current;
       const scale = 255 / (maxDb - minDb);
       const data = ring.data;
       for (let x = 0; x < width; x++) {
@@ -338,21 +367,39 @@ export function WaterfallDisplay({
   const clearHistory = useCallback(() => {
     ringRef.current = null;
     frameSkipRef.current = 0;
+    sourceKeyRef.current = "";
+    sequenceRef.current = -1;
     accumRef.current = null;
     hasAccumRef.current = false;
+    rowAverage.reset();
+    levelsEngine.reset();
     redraw(true);
-  }, [redraw]);
+  }, [redraw, rowAverage, levelsEngine]);
 
   useSpectrumStream(
     useCallback(
-      (spectrum) => {
+      (spectrum, _centerHz, info) => {
+        const key = `${spectrum.length}:${info?.sampleRate ?? sampleRateRef.current}:${info?.centerOffsetHz ?? 0}`;
+        if (key !== sourceKeyRef.current) {
+          sourceKeyRef.current = key;
+          rowAverage.reset();
+          noiseFilterEngine.reset();
+          hasAccumRef.current = false;
+          frameSkipRef.current = 0;
+          sequenceRef.current = -1;
+          levelsEngine.reset();
+        }
+        if (info && info.sequence === sequenceRef.current) return;
+        sequenceRef.current = info?.sequence ?? -1;
         // A backgrounded phone tab does no drawing; skip the filter work too.
         if (typeof document !== "undefined" && document.hidden) return;
         const filtered = noiseFilterEngine.apply(
           spectrum,
           noiseStrengthRef.current,
         );
-        // Peak-hold across skipped frames for slow mode.
+        const alreadyAveraged = (info?.averagedFfts ?? 0) > 1;
+        if (autoRef.current && !alreadyAveraged) rowAverage.add(filtered);
+        // Manual contrast retains the original peak-hold behavior.
         if (!accumRef.current || accumRef.current.length !== filtered.length) {
           accumRef.current = new Float32Array(filtered.length);
           accumRef.current.set(filtered);
@@ -377,7 +424,9 @@ export function WaterfallDisplay({
         }
         frameSkipRef.current = 0;
 
-        const row = accumRef.current;
+        const row = autoRef.current
+          ? (alreadyAveraged ? filtered : rowAverage.take())
+          : accumRef.current;
         let ring = ringRef.current;
         if (!ring || ring.n !== row.length) {
           ring = createRing(row.length);
@@ -385,15 +434,17 @@ export function WaterfallDisplay({
           needFullRef.current = true;
         }
         const rows = waterfallRowsPerUpdate(speedRef.current);
-        for (let r = 0; r < rows; r++) pushRow(ring, row, sampleRateRef.current);
+        const levels = levelsEngine.update(row);
+        for (let r = 0; r < rows; r++) pushRow(ring, row, info?.sampleRate ?? sampleRateRef.current, levels, info?.centerOffsetHz ?? 0);
         pendingRowsRef.current += rows;
 
         // Consume this stride window so the next frames start a fresh peak-hold.
         hasAccumRef.current = false;
         schedulePaint();
       },
-      [noiseFilterEngine, schedulePaint],
+      [noiseFilterEngine, schedulePaint, rowAverage, levelsEngine],
     ),
+    true,
   );
 
   // Mirror props into refs for the paint path, then repaint what changed.
@@ -411,8 +462,12 @@ export function WaterfallDisplay({
     lutRef.current = buildLut(paletteId);
     directionRef.current = direction;
     dbRef.current = dbRangeFor(dbRange);
+    autoRef.current = dbRange === "auto";
+    floorOffsetRef.current = floorOffsetDb;
+    rangeRef.current = rangeDb;
+    rowAverage.reset();
     redraw(true);
-  }, [paletteId, direction, dbRange, redraw]);
+  }, [paletteId, direction, dbRange, floorOffsetDb, rangeDb, redraw, rowAverage]);
 
   // The noise filter bakes into stored rows, so a change starts fresh.
   const noiseKey = useRef(noiseFilter);
@@ -459,8 +514,10 @@ export function WaterfallDisplay({
 
   const nav = useSpectrumNav(canvasRef, navHandlers);
 
-  // frequencyHz only labels the scope axis; the waterfall plots LO offsets.
-  void frequencyHz;
+  useEffect(() => {
+    noiseFilterEngine.reset();
+    clearHistory();
+  }, [frequencyHz, sampleRate, noiseFilterEngine, clearHistory]);
 
   return (
     <canvas

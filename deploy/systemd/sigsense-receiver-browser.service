@@ -1,0 +1,13 @@
+[Unit]
+Description=SigSense autonomous receiver browser
+After=network.target sigsense-receiver-control.service
+Wants=sigsense-receiver-control.service
+
+[Service]
+ExecStartPre=/usr/bin/curl --retry 30 --retry-connrefused --retry-delay 1 --fail --silent --output /dev/null http://127.0.0.1:3000/
+ExecStart=/usr/lib/chromium/chromium --headless --no-sandbox --disable-extensions --password-store=basic --disable-dev-shm-usage --disable-gpu --no-first-run --autoplay-policy=no-user-gesture-required --user-data-dir=/home/cole/sigsense/.runtime/receiver-browser http://127.0.0.1:3000/?receiverAgent=1
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

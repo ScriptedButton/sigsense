@@ -1,0 +1,35 @@
+{
+  "scope": "generated, seeded weak carriers plus noise, quantized to rtl_tcp's 8-bit IQ; not a captured RF test",
+  "sampleRate": 1024000,
+  "centerHz": 7100000,
+  "durationSeconds": 1,
+  "processingMs": 242.46595800000034,
+  "before": {
+    "binHz": 125,
+    "noiseScatterDb": 5.532309021224559,
+    "carrierContrastDb": 13.468551635742188
+  },
+  "continuousWide": {
+    "sampleRate": 1024000,
+    "centerOffsetHz": 0,
+    "binHz": 125,
+    "averagedFfts": 40,
+    "sequence": 249,
+    "noiseScatterDb": 0.6455771772400343,
+    "carrierContrastDb": 7.2107696533203125
+  },
+  "after": {
+    "sampleRate": 128000,
+    "centerOffsetHz": 0,
+    "binHz": 15.625,
+    "averagedFfts": 5,
+    "sequence": 30,
+    "noiseScatterDb": 2.0615743423612596,
+    "carrierContrastDb": 12.862510681152344
+  },
+  "reference": {
+    "method": "SciPy FIR decimation and NumPy overlapped periodogram averaging on exactly the same 8-bit IQ file",
+    "wide_max_error_db": 4.597866933409023e-06,
+    "narrow_passband_max_error_db": 6.7060108790428785e-06
+  }
+}
