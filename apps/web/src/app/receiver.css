@@ -2013,6 +2013,92 @@
   outline-offset: -2px;
 }
 
+/* Collapsible rail sections: a tab reads as a short list of headers. */
+.rail-section-stack {
+  gap: 0.5rem;
+}
+
+.rail-section {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.rail-section[data-active="true"] {
+  border-color: oklch(0.60 0.19 355 / 0.55);
+}
+
+.rail-section-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0 0.75rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.rail-section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.rail-section-summary::before {
+  content: "";
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 150ms var(--ease-out);
+}
+
+.rail-section[open] > .rail-section-summary::before {
+  transform: rotate(45deg);
+}
+
+.rail-section-summary:hover .rail-section-title {
+  color: var(--accent);
+}
+
+.rail-section-title {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.rail-section-hint {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.rail-section[data-active="true"] .rail-section-hint {
+  color: var(--accent);
+}
+
+.rail-section-body {
+  padding: 0.25rem 0.75rem 0.85rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+/* The section header already names the panel; drop the panel's own title. */
+.rail-section-body > .control-group > legend.control-label {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-section-summary::before {
+    transition: none;
+  }
+}
+
 /* ---- Notices (HackRF/API messages) ---- */
 .sdr-notice {
   display: flex;
@@ -4885,3 +4971,76 @@ html {
   padding-inline: 0.5rem;
 }
 /* ==== end digital voice ================================================== */
+
+/* Assistant command bar */
+.assistant-bar {
+  position: relative;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.assistant-form { display: flex; align-items: center; gap: 0.5rem; }
+.assistant-spark { color: var(--accent); font-size: 1rem; }
+.assistant-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.75rem;
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 0.9rem;
+}
+.assistant-input:focus { border-color: var(--focus); outline: none; }
+.assistant-kbd {
+  padding: 0.1rem 0.4rem;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  font-size: 0.7rem;
+}
+.assistant-panel {
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  top: 100%;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: min(50vh, 22rem);
+  overflow-y: auto;
+  padding: 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px oklch(0 0 0 / 0.5);
+}
+.assistant-suggestions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.assistant-line { margin: 0; font-size: 0.85rem; line-height: 1.4; white-space: pre-wrap; }
+.assistant-user { color: var(--accent); }
+.assistant-assistant { color: var(--ink); }
+.assistant-action { color: var(--muted); font-family: ui-monospace, monospace; font-size: 0.75rem; }
+.assistant-error { color: var(--danger); }
+.assistant-model {
+  max-width: 14rem;
+  padding: 0.5rem 0.4rem;
+  color: var(--muted);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 0.75rem;
+}
+.assistant-progress { color: var(--warn); font-size: 0.75rem; }
+.assistant-bar-collapsed { padding-block: 0.25rem; }
+.assistant-mic[data-on="true"] {
+  color: var(--primary-ink);
+  background: var(--primary);
+  animation: assistant-pulse 1.6s ease-in-out infinite;
+}
+@keyframes assistant-pulse { 50% { opacity: 0.65; } }
+@media (prefers-reduced-motion: reduce) { .assistant-mic[data-on="true"] { animation: none; } }
+.assistant-voice-status { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--danger); }
+.assistant-voice-status[data-listening="true"] { color: var(--accent); }

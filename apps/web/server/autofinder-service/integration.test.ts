@@ -21,7 +21,7 @@ test("findings survive process restart, repeated polls, rejections, errors, and 
     const path = join(directory, "state.json");
     const store = new FinderStore(emptySnapshot(), path);
     const at = new Date().toISOString();
-    const status: ServiceStatus = { at, status: "scanning", message: "Checking", sessionId: "agent", receiver: null,
+    const status: ServiceStatus = { at, status: "scanning", message: "Checking", sessionId: "agent", receiver: null, gain: { autoGain: false, gainDb: 50 },
       finder: { ...INITIAL_FINDER_STATE, recent: [
         { at, frequencyHz: 5950000, speechRatio: .8, accepted: true, band: "49 m", bandwidthHz: 4000 },
         { at, frequencyHz: 6100000, speechRatio: .05, accepted: false },
@@ -36,6 +36,7 @@ test("findings survive process restart, repeated polls, rejections, errors, and 
     const restored = await readSnapshot(path);
     assert.deepEqual(restored.findings, store.snapshot.findings);
     assert.equal(restored.enabled, false);
+    assert.deepEqual(restored.gain, { autoGain: false, gainDb: 50 });
     assert.equal(serviceView(restored, Date.now() + 90_000).stale, true);
     assert.equal((await stat(path)).mode & 0o777, 0o600);
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -56,6 +57,7 @@ test("UI API controls the running supervisor, releases before listening, and ser
       calls.push(action);
       if (action === "connect") { assert.equal(args.type, "rtltcp"); receiver = { ...receiver, connection: "rtltcp", status: "playing" }; }
       if (action === "get_state" || action === "connect") return receiver;
+      if (action === "configure") return receiver = { ...receiver, ...args };
       if (action === "autofinder_start") {
         assert.equal(args.maxListenMs, 30000);
         finder = { ...INITIAL_FINDER_STATE, status: "searching", message: "Searching 49 m" };
@@ -96,6 +98,16 @@ test("UI API controls the running supervisor, releases before listening, and ser
     assert.equal((await POST(new Request("http://localhost:3000/api/autofinder-service", { method: "POST", headers: { "Content-Type": "application/json" }, body: "x".repeat(1025) }))).status, 413);
     assert.equal((await POST(request("skip"))).status, 200);
     assert.ok(calls.includes("autofinder_skip"));
+    const gainRequest = (gain: unknown) => new Request("http://localhost:3000/api/autofinder-service", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(gain),
+    });
+    assert.equal((await POST(gainRequest({ action: "gain", autoGain: false, gainDb: 51 }))).status, 400);
+    assert.equal((await POST(gainRequest({ action: "gain", autoGain: false, gainDb: 50 }))).status, 200);
+    assert.equal(receiver.gainDb, 50); assert.equal(receiver.autoGain, false);
+    assert.deepEqual((await readSnapshot(path)).gain, { autoGain: false, gainDb: 50 });
+    assert.equal((await POST(gainRequest({ action: "gain", autoGain: true }))).status, 200);
+    assert.equal(receiver.autoGain, true);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/control`, { method: "POST", headers: { Authorization: "Bearer test-token" }, body: JSON.stringify({ action: "gain", autoGain: false, gainDb: "50" }) })).status, 400);
     calls.length = 0;
     response = await POST(request("release"));
     assert.equal(response.status, 200);
@@ -133,7 +145,7 @@ test("UI API controls the running supervisor, releases before listening, and ser
 test("the daemon restores a persisted pause and shuts down cleanly on SIGTERM", async () => {
   const directory = await mkdtemp(join(tmpdir(), "sigsense-finder-process-"));
   const path = join(directory, "state.json"), tokenFile = join(directory, "token.json");
-  await writeFile(path, JSON.stringify({ ...emptySnapshot(), enabled: false }));
+  await writeFile(path, JSON.stringify({ ...emptySnapshot(), enabled: false, gain: { autoGain: false, gainDb: 50 } }));
   const requests: string[] = [];
   const broker = createServer((request, response) => {
     requests.push(request.url ?? "");
@@ -163,6 +175,7 @@ test("the daemon restores a persisted pause and shuts down cleanly on SIGTERM", 
     assert.equal(await exited, 0, errors);
     const saved = await readSnapshot(path);
     assert.equal(saved.status, "stopped"); assert.equal(saved.enabled, false);
+    assert.deepEqual(saved.gain, { autoGain: false, gainDb: 50 });
   } finally {
     if (child.exitCode === null) { child.kill("SIGKILL"); await exited.catch(() => {}); }
     await new Promise<void>((done) => broker.close(() => done()));

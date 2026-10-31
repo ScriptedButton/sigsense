@@ -9,6 +9,12 @@ RTL connection. **Listen live** also starts cleanup after transferring the recei
 to the listening browser, and keeps optimizing until Stop or a manual dial/mode/
 bandwidth change takes ownership.
 
+**Clean this signal on server** (Find something to hear, on Radio and Stations) starts the same cleaner on
+demand for whatever AM signal you are tuned to, 2.3–30 MHz, on an RTL-SDR source,
+without running the finder. It uses the LAN worker when one is configured, with
+the usual local fallback. **Stop server cleaning**, retuning, or changing mode or
+bandwidth ends it. It is unavailable while the automatic finder is running.
+
 Radio and Stations show **Adaptive signal cleaning**, including the selected
 profile, optimization count, speech-spectrum similarity, measured quiet-interval
 noise reduction, and active whistle filters. **Listen cleaned**, **Compare original**,

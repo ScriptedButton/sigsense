@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MobileDock } from "@/components/sdr/mobile-dock";
 import {
@@ -21,14 +21,18 @@ import { DigitalVoicePanel } from "@/components/sdr/dvoice/dvoice-panel";
 import { FskPanel } from "@/components/sdr/fsk/fsk-panel";
 import { Ft8Panel } from "@/components/sdr/ft8/ft8-panel";
 import { GmrsChannelPresets } from "@/components/sdr/gmrs-channel-presets";
+import { isTyping } from "@/components/sdr/keyboard-shortcuts";
 import { ModeControl } from "@/components/sdr/mode-control";
+import { SCHEME_LABELS } from "@/components/sdr/mode-scheme-chips";
 import { MorsePanel } from "@/components/sdr/morse/morse-panel";
 import { P25Panel } from "@/components/sdr/p25/p25-panel";
+import { RailSection } from "@/components/sdr/rail-section";
 import { RailTabs } from "@/components/sdr/rail-tabs";
 import { SampleRateControl } from "@/components/sdr/sample-rate-control";
 import { ScannerPanel } from "@/components/sdr/scanner/scanner-panel";
 import { UpconverterControl } from "@/components/sdr/upconverter-control";
 import {
+  useAutofinderState,
   useFskState,
   useFt8State,
   useMorseState,
@@ -48,6 +52,7 @@ import { WefaxPanel } from "@/components/sdr/wefax/wefax-panel";
 import { normalizeCallsign } from "@/lib/sdr/callsign/normalize";
 import { useDvoice } from "@/lib/sdr/dvoice/store";
 import type { FreqFormatId, FreqTargetId } from "@/lib/sdr/display-settings";
+import { readRailPref, writeRailPref } from "@/lib/sdr/rail-prefs";
 
 type ControlRailProps = {
   onWideChange: (wide: boolean) => void;
@@ -59,13 +64,30 @@ type ControlRailProps = {
   onFreqFormatChange: (id: FreqFormatId) => void;
 };
 
-type MainTab = "radio" | "stations" | "decode" | "identify" | "bluetooth";
-type DecodeTab = "morse" | "fsk" | "ft8" | "wefax" | "trunk" | "digital" | "speech";
-type IdentifyTab = "signals" | "frequency" | "callsign";
+const MAIN_TABS = ["radio", "find", "decode", "identify", "bluetooth"] as const;
+const DECODE_TABS = ["morse", "fsk", "ft8", "wefax", "trunk", "digital", "speech"] as const;
+const IDENTIFY_TABS = ["signals", "frequency", "callsign"] as const;
+type MainTab = (typeof MAIN_TABS)[number];
+type DecodeTab = (typeof DECODE_TABS)[number];
+type IdentifyTab = (typeof IDENTIFY_TABS)[number];
+
+/** Picks up where you left off: the tab and sub-tab survive a reload. */
+function useRailTab<T extends string>(key: string, tabs: readonly T[]) {
+  const [tab, setTab] = useState<T>(() => readRailPref(key, tabs[0], tabs));
+  const set = useCallback(
+    (next: T) => {
+      setTab(next);
+      writeRailPref(key, next);
+    },
+    [key],
+  );
+  return [tab, set] as const;
+}
 
 /**
- * Tabbed side rail: Radio (daily tune/audio), Decode (progressive), Identify.
- * Replaces the old all-panels-stacked scroll that buried common ops.
+ * Tabbed side rail. Radio holds only the everyday tune/mode/audio controls;
+ * Find gathers every "find me something to hear" tool. Each tool is a
+ * collapsible section, so a tab reads as a short list of headers.
  */
 export function ControlRail({
   onWideChange,
@@ -85,8 +107,9 @@ export function ControlRail({
   const dvoice = useDvoice();
   const scan = useSignalIdState();
   const scanner = useScannerState();
+  const finder = useAutofinderState();
 
-  const [mainTab, setMainTabState] = useState<MainTab>("radio");
+  const [mainTab, setMainTabState] = useRailTab<MainTab>("tab", MAIN_TABS);
   // The rail keeps one width across tabs; widening is opt-in from the
   // Bluetooth panel so switching tabs never moves the tab bar or display.
   const [btExpanded, setBtExpanded] = useState(false);
@@ -110,8 +133,11 @@ export function ControlRail({
     setBtExpanded(next);
     onWideChange(next);
   };
-  const [decodeTab, setDecodeTab] = useState<DecodeTab>("morse");
-  const [identifyTab, setIdentifyTab] = useState<IdentifyTab>("signals");
+  const [decodeTab, setDecodeTab] = useRailTab<DecodeTab>("decode", DECODE_TABS);
+  const [identifyTab, setIdentifyTab] = useRailTab<IdentifyTab>(
+    "identify",
+    IDENTIFY_TABS,
+  );
   const [lookupSeed, setLookupSeed] = useState<CallsignLookupSeed | null>(
     null,
   );
@@ -128,18 +154,40 @@ export function ControlRail({
     scanner.status === "scanning" ||
     scanner.status === "held" ||
     scanner.status === "paused";
+  const finderActive = !["idle", "error"].includes(finder.status);
+
+  // 1–5 jump straight to a tab, from anywhere that isn't a text field.
+  const setMainTabRef = useRef(setMainTab);
+  useEffect(() => {
+    setMainTabRef.current = setMainTab;
+  });
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.altKey || event.metaKey || event.ctrlKey) return;
+      if (isTyping(event.target)) return;
+      const index = Number(event.key) - 1;
+      const tab = MAIN_TABS[index];
+      if (!Number.isInteger(index) || !tab) return;
+      event.preventDefault();
+      setMainTabRef.current(tab);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   const callsignNav = useMemo(
     () => ({
       openCallsignLookup: (callsign: string) => {
         const call = normalizeCallsign(callsign) ?? callsign.trim().toUpperCase();
-        setMainTab("identify");
+        setMainTabRef.current("identify");
         setIdentifyTab("callsign");
         setLookupSeed({ callsign: call, nonce: Date.now() });
       },
     }),
-    [],
+    [setIdentifyTab],
   );
+
+  const spanMhz = (state.sampleRate / 1e6).toFixed(state.sampleRate < 1e6 ? 3 : 2);
 
   return (
     <CallsignLookupNavProvider value={callsignNav}>
@@ -178,21 +226,29 @@ export function ControlRail({
             setSheetOpen(true);
           }}
           tabs={[
-            { id: "radio", label: "Radio", badge: scannerActive },
-            { id: "stations", label: "Stations" },
+            { id: "radio", label: "Radio", title: "Tune, mode, audio, RF (1)" },
+            {
+              id: "find",
+              label: "Find",
+              title: "Auto finder, station schedules, scanner (2)",
+              badge: scannerActive || finderActive,
+            },
             {
               id: "decode",
               label: "Decode",
+              title: "Morse, FSK, FT8, fax, trunking, digital voice, speech (3)",
               badge: decodeActive,
             },
             {
               id: "identify",
               label: "Identify",
+              title: "Signal ID, frequency and callsign lookup (4)",
               badge: scan.signals.length > 0 ? scan.signals.length : false,
             },
             {
               id: "bluetooth",
-              label: "Bluetooth",
+              label: "BLE",
+              title: "HackRF Bluetooth LE capture (5)",
               badge: state.connection === "hackrf",
             },
           ]}
@@ -204,37 +260,75 @@ export function ControlRail({
               role="tabpanel"
               id="rail-panel-radio"
               aria-labelledby="rail-tab-radio"
-              className="control-rail-stack"
+              className="control-rail-stack rail-section-stack"
             >
               <MobileDock />
-              <AutofinderPanel />
-              <ServiceFinderPanel />
-              <FrequencyControl
-                freqTarget={freqTarget}
-                freqFormat={freqFormat}
-                onFreqTargetChange={onFreqTargetChange}
-                onFreqFormatChange={onFreqFormatChange}
-                showDigits={false}
-              />
-              <ModeControl showSchemes={false} />
-              <SampleRateControl />
-              <UpconverterControl />
-              <HackrfRadioSection />
-              <AudioGainControl />
-              <GmrsChannelPresets />
-              <ScannerPanel />
-              <HelpCard supported={state.webUsbSupported} />
+              <RailSection id="tune" title="Tune" defaultOpen>
+                <FrequencyControl
+                  freqTarget={freqTarget}
+                  freqFormat={freqFormat}
+                  onFreqTargetChange={onFreqTargetChange}
+                  onFreqFormatChange={onFreqFormatChange}
+                  showDigits={false}
+                />
+              </RailSection>
+              <RailSection
+                id="mode"
+                title="Mode & squelch"
+                hint={SCHEME_LABELS[state.scheme]}
+                defaultOpen
+              >
+                <ModeControl showSchemes={false} />
+              </RailSection>
+              <RailSection id="audio" title="Audio" defaultOpen>
+                <AudioGainControl />
+              </RailSection>
+              <RailSection id="rf" title="RF & span" hint={`${spanMhz} MHz`}>
+                <div className="control-rail-stack">
+                  <SampleRateControl />
+                  <UpconverterControl />
+                  <HackrfRadioSection />
+                </div>
+              </RailSection>
+              <RailSection id="gmrs" title="GMRS channels">
+                <GmrsChannelPresets />
+              </RailSection>
+              <RailSection id="setup" title="Setup help">
+                <HelpCard supported={state.webUsbSupported} />
+              </RailSection>
             </div>
           )}
 
-          {mainTab === "stations" && (
+          {mainTab === "find" && (
             <div
               role="tabpanel"
-              id="rail-panel-stations"
-              aria-labelledby="rail-tab-stations"
-              className="control-rail-stack"
+              id="rail-panel-find"
+              aria-labelledby="rail-tab-find"
+              className="control-rail-stack rail-section-stack"
             >
-              <ShortwaveExplorer />
+              <RailSection
+                id="autofinder"
+                title="Find speech automatically"
+                hint={finderActive ? finder.status : "HF 2.3–30 MHz"}
+                active={finderActive}
+                defaultOpen
+              >
+                <AutofinderPanel />
+              </RailSection>
+              <RailSection id="schedules" title="Shortwave stations" hint="EiBi schedule" defaultOpen>
+                <ShortwaveExplorer />
+              </RailSection>
+              <RailSection
+                id="scanner"
+                title="Memory scanner"
+                hint={scannerActive ? scanner.status : undefined}
+                active={scannerActive}
+              >
+                <ScannerPanel />
+              </RailSection>
+              <RailSection id="background-finder" title="Background finder" hint="runs on the receiver host">
+                <ServiceFinderPanel />
+              </RailSection>
             </div>
           )}
 

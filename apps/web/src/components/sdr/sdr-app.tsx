@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
+import { AssistantBar } from "@/components/sdr/assistant-bar";
 import { AppHeader } from "@/components/sdr/app-header";
 import { KeyboardShortcuts } from "@/components/sdr/keyboard-shortcuts";
 import { ControlRail } from "@/components/sdr/control-rail";
@@ -160,6 +161,8 @@ export function SdrApp({ onSectionChange }: SdrAppProps) {
         onFrequencyChange={onHeaderFreqChange}
         onSectionChange={onSectionChange}
       />
+
+      <AssistantBar />
 
       {state.error && (
         <div className="sdr-error" role="alert">

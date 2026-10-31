@@ -105,7 +105,8 @@ async function main() {
           return;
         }
         if (request.method === "POST") {
-          const action = JSON.parse(request.postData).action;
+          const command = JSON.parse(request.postData);
+          const action = command.action;
           events.push(action);
           if (action === "release" && holdNextRelease) {
             holdNextRelease = false; heldRelease = message.params.requestId; return;
@@ -118,6 +119,7 @@ async function main() {
           if (action === "pause") view = { ...view, enabled: false, status: "paused", message: "Background search paused." };
           if (action === "resume") view = { ...view, enabled: true, status: "scanning", message: "Searching 49 m" };
           if (action === "release") view = { ...view, status: "yielding", message: "Receiver available for listening." };
+          if (action === "gain") view = { ...view, gain: command.autoGain ? { autoGain: true } : { autoGain: false, gainDb: command.gainDb } };
         }
         void cdp("Fetch.fulfillRequest", { requestId: message.params.requestId, responseCode: 200,
           responseHeaders: [{ name: "Content-Type", value: "application/json" }], body: Buffer.from(JSON.stringify(view)).toString("base64") });
@@ -141,6 +143,10 @@ async function main() {
     process.stdout.write("finder-ui: finding rendered\n");
     assert.ok((await text()).includes("82% speech activity"));
     assert.ok((await text()).includes("LAN GPU · demucs-dns64 · Fixture GPU · 12 ms round trip"));
+    await evaluate(`document.querySelector('[aria-label="Background shortwave finder"] form').requestSubmit()`);
+    await until(async () => (await text()).includes("Manual 50 dB selected."), "Manual background gain did not render");
+    await click("Auto gain");
+    await until(async () => (await text()).includes("Auto gain selected."), "Auto background gain did not render");
     await click("Listen cleaned");
     await until(async () => events.includes("monitor-clean") && await evaluate(`document.querySelector('[aria-label="Background shortwave finder"] [aria-label="Adaptive signal cleaning"] label span')?.textContent === 'Cleaned'`), "Cleaned monitor did not schedule PCM playback");
     await click("Compare original");

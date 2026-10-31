@@ -56,7 +56,9 @@
     ".next-service-finder/types/**/*.ts",
     ".next-service-finder/dev/types/**/*.ts",
     ".next-prod-lan-worker-20261030/types/**/*.ts",
-    ".next-prod-lan-worker-20261030/dev/types/**/*.ts"
+    ".next-prod-lan-worker-20261030/dev/types/**/*.ts",
+    ".next-background-gain/types/**/*.ts",
+    ".next-background-gain/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

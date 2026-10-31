@@ -21,6 +21,7 @@
     "@jitsi/rnnoise-wasm": "0.2.1",
     "@jtarrio/signals": "^0.10.1",
     "@jtarrio/webrtlsdr": "^3.0.6",
+    "@mlc-ai/web-llm": "^0.2.87",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/server": "2.4.0",
     "next": "16.4.2",

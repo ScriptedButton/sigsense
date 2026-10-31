@@ -8,8 +8,6 @@ import { ShortwaveList } from "@/components/sdr/shortwave/shortwave-list";
 import { ShortwaveListeningControls } from "@/components/sdr/shortwave/shortwave-listening-controls";
 import { ReceivedSignals } from "@/components/sdr/shortwave/received-signals";
 import { ShortwaveSurveyResults } from "@/components/sdr/shortwave/shortwave-survey-results";
-import { AutofinderPanel } from "@/components/sdr/shortwave/autofinder-panel";
-import { ServiceFinderPanel } from "@/components/sdr/shortwave/service-finder-panel";
 import { KiwiDiversityPanel } from "@/components/sdr/shortwave/kiwi-diversity-panel";
 import { ShortwaveTunedMatches } from "@/components/sdr/shortwave/shortwave-tuned-matches";
 import { useShortwaveSchedule } from "@/components/sdr/shortwave/use-shortwave-schedule";
@@ -31,7 +29,7 @@ import type {
 
 /**
  * Browse EiBi shortwave schedules and one-tap tune AM.
- * Lives on the Radio rail beside GMRS channel presets.
+ * Lives on the Find rail beside the speech finders.
  */
 export function ShortwaveExplorer() {
   const tune = useTuneShortwave();
@@ -99,8 +97,6 @@ export function ShortwaveExplorer() {
   return (
     <fieldset className="control-group">
       <legend className="control-label">Shortwave explorer</legend>
-      <AutofinderPanel />
-      <ServiceFinderPanel />
       <KiwiDiversityPanel />
       <ShortwaveSurveyResults />
       {!schedule ? (

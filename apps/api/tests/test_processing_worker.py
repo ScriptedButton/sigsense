@@ -111,6 +111,16 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(cleaner.neural), 0)
         self.assertIsNone(cleaner.report["metrics"])
 
+    def test_failure_diagnostics_do_not_log_exception_secrets(self):
+        with patch.dict(os.environ, {"SIGSENSE_PROCESSING_URL": ""}):
+            worker = LanNeuralWorker(Local())
+        for error, reason in ((TimeoutError(TOKEN), "worker_stall"), (ValueError(TOKEN), "invalid_audio"), (OSError(TOKEN), "connection_error")):
+            self.assertEqual(worker._reason(error), reason)
+            with self.assertLogs("sigsense_api.processing_client", level="WARNING") as messages:
+                worker._record_failure(reason, error)
+            self.assertIn(reason, messages.output[0])
+            self.assertNotIn(TOKEN, " ".join(messages.output))
+
 
 class WorkerTests(unittest.TestCase):
     def test_startup_refuses_missing_authentication(self):
@@ -166,18 +176,22 @@ class WorkerTests(unittest.TestCase):
                     self.assertEqual(worker.status["location"], "lan")
                     self.assertFalse(worker.status["accelerated"])
                     self.assertEqual(worker.generation, 1)
+                    await asyncio.sleep(.02)  # the final buffered exchange is complete
                     engine.fail = True
-                    output = await worker.apply(np.full(BLOCK, .09, dtype=np.float32))
-                    # Prior block = .08, warm local gain = .5; no gap or stale remote audio.
+                    await worker.apply(np.full(BLOCK, .09, dtype=np.float32))
+                    await asyncio.sleep(.03)
+                    output = await worker.apply(np.full(BLOCK, .10, dtype=np.float32))
+                    # Two-block timeline: .08 * warm local gain .5, with no clock shift.
                     np.testing.assert_allclose(output, .04, atol=1e-7)
                     self.assertEqual(worker.status["location"], "local")
                     self.assertTrue(worker.status["fallback"])
                     self.assertEqual(worker.generation, 2)
+                    self.assertEqual(worker.status["lastFailure"], "worker_processing")
                     engine.fail = False
                     worker.retry_at = 0
                     await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
                     await asyncio.wait_for(worker.connect_task, 2)
-                    for _ in range(6):
+                    for _ in range(7):
                         output = await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
                     np.testing.assert_allclose(output, .025, atol=1e-7)
                     self.assertEqual(worker.status["location"], "lan")
@@ -229,7 +243,7 @@ class WorkerTests(unittest.TestCase):
                     await worker.close()
             asyncio.run(run())
 
-    def test_slow_worker_drops_remote_audio_and_returns_warm_local(self):
+    def test_isolated_late_block_keeps_connection_and_returns_warm_local(self):
         engine = TestEngine()
         with patch.dict(os.environ, {"SIGSENSE_PROCESSING_TOKEN": TOKEN}), WorkerServer(engine) as server, patch.dict(os.environ, {"SIGSENSE_PROCESSING_URL": server.url, "SIGSENSE_PROCESSING_DEADLINE_MS": "40"}):
             async def run():
@@ -239,11 +253,107 @@ class WorkerTests(unittest.TestCase):
                     await asyncio.wait_for(worker.connect_task, 2)
                     for _ in range(6):
                         await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    await asyncio.sleep(.02)
+                    connection = worker.remote
                     engine.stall = .2
+                    await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    await asyncio.sleep(.01)
+                    engine.stall = 0  # only the already-running exchange is late
                     started = time.monotonic()
                     output = await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
                     self.assertLess(time.monotonic() - started, .18)
                     np.testing.assert_allclose(output, .05, atol=1e-7)
+                    self.assertTrue(worker.status["fallback"])
+                    self.assertIs(worker.remote, connection)
+                    self.assertEqual(worker.status["lateBlocks"], 1)
+                    self.assertEqual(worker.status["lastFailure"], "playout_deadline")
+                    await asyncio.sleep(.22)
+                    for i in range(8):
+                        output = await worker.apply(np.full(BLOCK, (i + 11) / 100, dtype=np.float32))
+                    # Late results were drained, not mistaken for a newer audio block.
+                    np.testing.assert_allclose(output, .16 * .25, atol=1e-7)
+                    self.assertEqual(worker.status["location"], "lan")
+                    self.assertIs(worker.remote, connection)
+                    self.assertEqual(worker.status["reconnects"], 0)
+                    self.assertIsNone(worker.warning)
+                finally:
+                    await worker.close()
+            asyncio.run(run())
+
+    def test_buffer_absorbs_a_reply_slower_than_old_deadline(self):
+        engine = TestEngine()
+        with patch.dict(os.environ, {"SIGSENSE_PROCESSING_TOKEN": TOKEN}), WorkerServer(engine) as server, patch.dict(os.environ, {"SIGSENSE_PROCESSING_URL": server.url, "SIGSENSE_PROCESSING_DEADLINE_MS": "90"}):
+            async def run():
+                worker = LanNeuralWorker(Local())
+                await worker.start()
+                try:
+                    await asyncio.wait_for(worker.connect_task, 2)
+                    for _ in range(8):
+                        await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    await asyncio.sleep(.02)
+                    connection = worker.remote
+                    engine.stall = .13
+                    await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    # Real incoming audio arrives every 100 ms. A 130 ms response
+                    # now has only ~30 ms left to wait inside its playout window.
+                    await asyncio.sleep(.1)
+                    engine.stall = 0
+                    output = await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    np.testing.assert_allclose(output, .025, atol=1e-7)
+                    self.assertIs(worker.remote, connection)
+                    self.assertEqual(worker.status["lateBlocks"], 0)
+                    self.assertEqual(worker.status["reconnects"], 0)
+                    self.assertEqual(worker.generation, 1)
+                finally:
+                    await worker.close()
+            asyncio.run(run())
+
+    def test_sustained_slow_worker_cannot_accumulate_audio_or_delay_local_output(self):
+        engine = TestEngine()
+        with patch.dict(os.environ, {"SIGSENSE_PROCESSING_TOKEN": TOKEN}), WorkerServer(engine) as server, patch.dict(os.environ, {"SIGSENSE_PROCESSING_URL": server.url, "SIGSENSE_PROCESSING_DEADLINE_MS": "20"}):
+            async def run():
+                worker = LanNeuralWorker(Local())
+                await worker.start()
+                try:
+                    await asyncio.wait_for(worker.connect_task, 2)
+                    for _ in range(8):
+                        await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    await asyncio.sleep(.02)
+                    engine.stall = .4
+                    for _ in range(8):
+                        started = time.monotonic()
+                        output = await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                        self.assertLess(time.monotonic() - started, .12)
+                        if worker.requests:
+                            self.assertLessEqual(worker.requests.qsize(), 2)
+                        self.assertLessEqual(len(worker.results), 1)
+                        if worker.remote is None:
+                            break
+                    self.assertIsNone(worker.remote)
+                    self.assertEqual(worker.status["reconnects"], 1)
+                    self.assertIn(worker.status["lastFailure"], ("queue_saturation", "sustained_lateness"))
+                    np.testing.assert_allclose(output, .05, atol=1e-7)
+                    self.assertGreater(worker.retry_at, time.monotonic())
+                finally:
+                    await worker.close()
+                self.assertIsNone(worker.exchange_task)
+                self.assertFalse(worker.results)
+                self.assertFalse(worker.cleanup_tasks)
+            asyncio.run(run())
+
+    def test_stalled_exchange_has_distinct_reason_and_is_closed(self):
+        engine = TestEngine()
+        with patch.dict(os.environ, {"SIGSENSE_PROCESSING_TOKEN": TOKEN}), WorkerServer(engine) as server, patch.dict(os.environ, {"SIGSENSE_PROCESSING_URL": server.url}):
+            async def run():
+                worker = LanNeuralWorker(Local())
+                await worker.start()
+                try:
+                    await asyncio.wait_for(worker.connect_task, 2)
+                    engine.stall = .7
+                    await worker.apply(np.full(BLOCK, .1, dtype=np.float32))
+                    await asyncio.sleep(.6)
+                    self.assertIsNone(worker.remote)
+                    self.assertEqual(worker.status["lastFailure"], "worker_stall")
                     self.assertTrue(worker.status["fallback"])
                 finally:
                     await worker.close()
@@ -256,7 +366,8 @@ class WorkerTests(unittest.TestCase):
             with TestClient(app) as client, client.websocket_connect("/autofinder/cleaner/source/lan-integration") as source:
                 source.send_json({"frequencyHz": 5950000, "sampleRate": 16000, "source": "demo"})
                 first = source.receive_json()
-                self.assertEqual(first["processing"]["delayMs"], 100)
+                self.assertEqual(first["processing"]["delayMs"], 200)
+                self.assertEqual(first["processing"]["bufferMs"], 100)
                 with client.websocket_connect("/autofinder/cleaner/listen/lan-integration?stage=raw") as listener:
                     listener.receive_json()
                     active = {}
@@ -282,12 +393,19 @@ class WorkerTests(unittest.TestCase):
                             self.assertEqual(len(packet["bytes"]), BLOCK * 2)
                             break
                     engine.fail = True
-                    source.send_bytes(np.full(BLOCK, 2000, dtype="<i2").tobytes())
                     fallback = {}
-                    while not fallback:
-                        packet = source.receive()
-                        if packet.get("text"):
-                            fallback = json.loads(packet["text"])
+                    for _ in range(3):
+                        source.send_bytes(np.full(BLOCK, 2000, dtype="<i2").tobytes())
+                        while True:
+                            packet = source.receive()
+                            if packet.get("text"):
+                                state = json.loads(packet["text"])
+                                if state.get("processing", {}).get("fallback"):
+                                    fallback = state
+                            if packet.get("bytes"):
+                                break
+                        if fallback:
+                            break
                     self.assertTrue(fallback["processing"]["fallback"])
                     self.assertEqual(fallback["profile"], "Natural")
                     self.assertIsNone(fallback["metrics"])

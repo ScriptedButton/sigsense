@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { readSnapshot, serviceView } from "../../../../server/autofinder-service/store";
-import { SERVICE_ACTIONS } from "@/lib/sdr/autofinder/service-types";
-import type { ServiceView } from "@/lib/sdr/autofinder/service-types";
+import { parseServiceControl } from "@/lib/sdr/autofinder/service-types";
+import type { ServiceControl, ServiceView } from "@/lib/sdr/autofinder/service-types";
 import { requestOrigin, sameOrigin } from "../../../../server/request-origin";
 
 const headers = { "Cache-Control": "no-store, private", "Cross-Origin-Resource-Policy": "same-origin" };
@@ -16,7 +16,7 @@ function publicView(view: ServiceView, request: Request) {
   return view;
 }
 
-async function daemon(path: string, body?: { action: string }) {
+async function daemon(path: string, body?: ServiceControl) {
   const configPath = process.env.SIGSENSE_RECEIVER_TOKEN_FILE ?? process.env.SIGSENSE_CONTROL_CONFIG ?? resolve(process.cwd(), "../../.runtime/receiver-control.json");
   const config = JSON.parse(await readFile(/* turbopackIgnore: true */ configPath, "utf8"));
   const token = process.env.SIGSENSE_RECEIVER_TOKEN ?? config.token;
@@ -44,7 +44,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   if (!sameOrigin(request)) return Response.json({ error: "Same-origin receiver access required" }, { status: 403, headers });
   if (request.headers.get("content-type")?.split(";")[0] !== "application/json") return Response.json({ error: "Expected JSON" }, { status: 415, headers });
-  let body: { action?: unknown };
+  let body: unknown;
   try {
     const reader = request.body?.getReader();
     if (!reader) throw new Error("Empty request");
@@ -60,11 +60,12 @@ export async function POST(request: Request) {
     data += decoder.decode();
     body = JSON.parse(data);
   } catch { return Response.json({ error: "Invalid JSON" }, { status: 400, headers }); }
-  if (!body || typeof body.action !== "string" || !(SERVICE_ACTIONS as readonly string[]).includes(body.action)) {
-    return Response.json({ error: "Unknown finder action" }, { status: 400, headers });
+  const command = parseServiceControl(body);
+  if (!command) {
+    return Response.json({ error: "Invalid finder command. Manual gain must be between 0 and 50 dB; Auto requires autoGain: true." }, { status: 400, headers });
   }
   try {
-    const response = await daemon("/control", { action: body.action });
+    const response = await daemon("/control", command);
     const result = await response.json();
     return Response.json(response.ok ? publicView(result, request) : result, { status: response.status, headers });
   } catch {

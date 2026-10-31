@@ -676,10 +676,30 @@ export class RadioController {
     this.backendCleanPlayback.unlock();
     this.backendCleanPlayback.setVolume(this.monitorMuted ? 0 : this.state.volume);
   }
-  startSignalCleaning(frequencyHz: number): void {
-    if (this.state.status !== "playing" || this.state.scheme !== "AM") return;
+  /** Why on-demand backend cleaning cannot start on the current signal, or null when it can. */
+  signalCleaningUnavailable(): string | null {
+    const state = this.state, tunedHz = state.frequencyHz + state.offsetHz;
+    if (state.status !== "playing") return "Start the receiver first.";
+    if (!["rtltcp", "device", "demo"].includes(state.connection)) return "Server cleaning requires an RTL-SDR receiver.";
+    if (state.scheme !== "AM") return "Server cleaning currently supports AM.";
+    if (tunedHz < 2_300_000 || tunedHz > 30_000_000) return "Server cleaning covers 2.3–30 MHz.";
+    const finder = this.finder?.getState().status;
+    if (finder && !["idle", "error"].includes(finder)) return "The automatic finder is already cleaning its signal.";
+    return null;
+  }
+  getSignalCleaningHz(): number | null { return this.manualCleaningHz; }
+  /** Clean the tuned signal on the server (LAN worker when configured) until stopped or retuned. */
+  startSignalCleaning(frequencyHz = this.state.frequencyHz + this.state.offsetHz): void {
+    const reason = this.signalCleaningUnavailable();
+    if (reason) throw new Error(reason);
     this.getFinder(); this.prepareCleanPlayback();
     this.manualCleaningHz = frequencyHz; this.syncFinderCleaner();
+    // The stream connects on the next PCM block; report intent immediately.
+    if (this.finder?.getState().cleaning?.status !== "starting") this.finder?.setCleaning({ status: "starting", streamId: "", frequencyHz });
+  }
+  stopSignalCleaning(): void {
+    if (this.manualCleaningHz === null) return;
+    this.manualCleaningHz = null; this.syncFinderCleaner();
   }
   private cancelManualCleaning(): void {
     if (!this.finderCommandDepth && this.manualCleaningHz !== null) { this.manualCleaningHz = null; this.syncFinderCleaner(); }

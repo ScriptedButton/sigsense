@@ -12,12 +12,13 @@ const SHORTCUTS: { keys: string[]; action: string }[] = [
   { keys: ["Ctrl", "Shift", "←", "→"], action: "Tune down / up 100 Hz" },
   { keys: ["←", "→"], action: "Pan the scope (scope focused)" },
   { keys: ["+", "−"], action: "Zoom the scope (scope focused)" },
+  { keys: ["1", "–", "5"], action: "Open Radio / Find / Decode / Identify / BLE" },
   { keys: ["?"], action: "Show or hide this list" },
   { keys: ["Esc"], action: "Close this list" },
 ];
 
 /** Keys that belong to the focused control, not the global shortcuts. */
-function isTyping(target: EventTarget | null): boolean {
+export function isTyping(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
   return /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(target.tagName) ||

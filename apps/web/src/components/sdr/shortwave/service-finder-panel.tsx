@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRadioController, useSdrState } from "@/components/sdr/sdr-provider";
-import type { ServiceAction, ServiceView, SignalFinding } from "@/lib/sdr/autofinder/service-types";
+import type { ServiceAction, ServiceControl, ServiceView, SignalFinding } from "@/lib/sdr/autofinder/service-types";
 import { CleanerPanel } from "./cleaner-panel";
 
 const date = (at: string) => at ? new Date(at).toLocaleString() : "Never";
@@ -36,9 +36,9 @@ export function ServiceFinderPanel() {
     return () => { mounted.current = false; abort.abort(); clearTimeout(timer); };
   }, [refresh]);
 
-  const control = async (action: ServiceAction) => {
+  const control = async (command: ServiceAction | ServiceControl) => {
     const response = await fetch("/api/autofinder-service", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }), signal: AbortSignal.timeout(45_000),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(typeof command === "string" ? { action: command } : command), signal: AbortSignal.timeout(45_000),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error ?? "Background finder command failed.");
@@ -69,18 +69,38 @@ export function ServiceFinderPanel() {
   const online = Boolean(view?.online && !view.stale);
   const findings = showAll ? view?.findings : view?.findings.slice(0, 8);
   const label = !view ? "Loading…" : !online ? "Offline" : view.status === "scanning" ? finder?.status === "listening" ? "Speech detected" : "Searching" : view.status;
-  return <section className="mb-3 rounded border border-line p-3" aria-label="Background shortwave finder">
-    <div className="flex items-center justify-between gap-2">
-      <h3 className="text-sm font-medium text-ink">Background shortwave finder</h3>
-      <span className="text-[0.65rem] capitalize text-muted" role="status">{label}</span>
-    </div>
-    <p className="mt-1 text-[0.65rem] text-muted">Finds speech on your receiver across 2.3–30 MHz and saves results while your browser is closed.</p>
+  return <section aria-label="Background shortwave finder">
+    <p className="text-[0.65rem] text-muted"><span className="capitalize text-ink" role="status">{label}</span> · Finds speech on your receiver across 2.3–30 MHz and saves results while your browser is closed.</p>
     <div className="mt-2 flex flex-wrap gap-1">
       {view?.enabled ? <button type="button" className="mode-chip" disabled={busy || !online} onClick={() => void run(() => control("pause"))}>Pause background search</button>
         : <button type="button" className="mode-chip mode-chip-active" disabled={busy || !online} onClick={() => void run(() => control("resume"))}>Resume background search</button>}
       <button type="button" className="mode-chip" disabled={busy || !online || !finder?.frequencyHz || view?.status !== "scanning"} onClick={() => void run(() => control("skip"))}>Skip background signal</button>
       <button type="button" className="mode-chip" disabled={busy} onClick={() => void run(() => refresh())}>Refresh findings</button>
     </div>
+    <fieldset className="mt-3 rounded border border-line p-2" disabled={busy || !online}>
+      <legend className="px-1 text-xs text-ink">Background RF gain</legend>
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
+        event.preventDefault();
+        const gainDb = Number(new FormData(event.currentTarget).get("gainDb"));
+        if (!Number.isFinite(gainDb) || gainDb < 0 || gainDb > 50) { setError("Choose a gain between 0 and 50 dB."); return; }
+        void run(() => control({ action: "gain", autoGain: false, gainDb }));
+      }}>
+        <label className="flex flex-col gap-1 text-[0.65rem] text-muted">Manual gain (dB)
+          <input key={view?.gain?.autoGain === false ? view.gain.gainDb : "auto"} name="gainDb" type="number" min="0" max="50" step="0.1" required
+            defaultValue={view?.gain?.autoGain === false ? view.gain.gainDb : 50}
+            className="w-20 rounded border border-line bg-transparent px-2 py-1 text-xs text-ink" />
+        </label>
+        <button type="submit" className="mode-chip">Apply manual gain</button>
+        <button type="button" className={`mode-chip ${view?.gain?.autoGain ? "mode-chip-active" : ""}`} aria-pressed={view?.gain?.autoGain ?? false}
+          onClick={() => void run(() => control({ action: "gain", autoGain: true }))}>Auto gain</button>
+      </form>
+      <p className="mt-2 text-[0.65rem] text-muted">
+        {view?.gain ? view.gain.autoGain ? "Auto gain selected." : `Manual ${view.gain.gainDb} dB selected.` : "Uses the background receiver’s current gain."}
+        {view?.status === "scanning" && view.receiver ? ` Receiver: ${view.receiver.gainDb.toFixed(1)} dB (${view.receiver.autoGain ? "auto" : "manual"}).` : " Applied when background scanning resumes."}
+        {" Saved across reconnects and service restarts. Does not change your live receiver."}
+      </p>
+      {view?.status === "scanning" && (view.receiver?.rfClipFraction ?? 0) > 0.001 && <p role="alert" className="mt-1 text-xs text-danger">Receiver is clipping. Lower manual gain or switch to Auto.</p>}
+    </fieldset>
     {online && <p className="mt-2 text-xs text-ink">{view?.message}</p>}
     {online && view?.status === "scanning" && finder && <p className="mt-1 text-[0.65rem] text-muted">
       {finder.band ?? "HF"}{finder.frequencyHz ? ` · ${frequency(finder.frequencyHz)}` : ""}

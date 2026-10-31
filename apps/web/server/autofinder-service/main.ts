@@ -9,6 +9,7 @@ async function main() {
   const store = new FinderStore(await readSnapshot());
   const service: AutofinderService = new AutofinderService(undefined, undefined, (status): Promise<void> => store.update(status, service.enabled));
   service.enabled = store.snapshot.enabled;
+  service.gain = store.snapshot.gain;
   const server = createServiceServer(async () => {
     const config = JSON.parse(await readFile(process.env.SIGSENSE_RECEIVER_TOKEN_FILE ?? DEFAULT_TOKEN_FILE, "utf8"));
     const token = process.env.SIGSENSE_RECEIVER_TOKEN ?? config.token;
@@ -29,7 +30,7 @@ async function main() {
         await service.tick();
         interval = 2_000;
       } catch (error) {
-        await store.update({ at: new Date().toISOString(), status: "error", message: error instanceof Error ? error.message : String(error), sessionId: null, receiver: null, finder: null }, service.enabled);
+        await store.update({ at: new Date().toISOString(), status: "error", message: error instanceof Error ? error.message : String(error), sessionId: null, receiver: null, finder: null, gain: service.gain }, service.enabled);
         interval = Math.min(30_000, interval * 2);
       }
       await delay(interval, undefined, { signal: abort.signal }).catch(() => {});

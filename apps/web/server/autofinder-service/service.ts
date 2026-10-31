@@ -1,7 +1,7 @@
 import { ReceiverBrokerClient } from "../receiver-mcp/tools";
 import type { FinderState } from "../../src/lib/sdr/autofinder/engine";
 import type { SdrState } from "../../src/lib/sdr/types";
-import type { ServiceAction, ServiceStatus } from "../../src/lib/sdr/autofinder/service-types";
+import type { ServiceAction, ServiceControl, ServiceGain, ServiceStatus } from "../../src/lib/sdr/autofinder/service-types";
 export type { ServiceStatus } from "../../src/lib/sdr/autofinder/service-types";
 
 type Session = { id: string; url: string; state: SdrState };
@@ -16,6 +16,9 @@ export class AutofinderService {
   private retryFinderAt = 0;
   private startedFinder = false;
   private queue: Promise<unknown> = Promise.resolve();
+  private gainPending = false;
+  private lastStatus: ServiceStatus | null = null;
+  public gain: ServiceGain | undefined;
   public enabled = true;
 
   constructor(
@@ -32,7 +35,8 @@ export class AutofinderService {
   }
 
   private status(status: ServiceStatus["status"], message: string, receiver: SdrState | null = null, finder: FinderState | null = null) {
-    return this.publish({ at: new Date().toISOString(), status, message, sessionId: this.selected, receiver, finder });
+    this.lastStatus = { at: new Date().toISOString(), status, message, sessionId: this.selected, receiver, finder, gain: this.gain };
+    return this.publish(this.lastStatus);
   }
 
   private command(action: Parameters<ReceiverBrokerClient["command"]>[0], args: Record<string, unknown> = {}) {
@@ -54,7 +58,7 @@ export class AutofinderService {
       await this.status(this.enabled ? "waiting" : "paused", this.enabled ? "Waiting for the dedicated receiver browser." : "Background search paused.");
       return this.enabled ? "waiting" : "paused";
     }
-    if (this.selected !== dedicated.id) { this.owned = false; this.startedFinder = false; }
+    if (this.selected !== dedicated.id) { this.owned = false; this.startedFinder = false; this.gainPending = true; }
     this.selected = dedicated.id;
     if (dedicated.state?.connection === "rtltcp" && dedicated.state.status === "playing") this.owned = true;
     const competing = sessions.find((session) => session.id !== dedicated.id && session.state?.connection === "rtltcp" && ["playing", "starting"].includes(session.state.status));
@@ -66,6 +70,10 @@ export class AutofinderService {
     }
 
     let receiver = await this.command("get_state") as SdrState;
+    // Adopt an existing manual setting when upgrading rather than silently enabling AGC.
+    if (!this.gain && typeof receiver.autoGain === "boolean" && Number.isFinite(receiver.gainDb)) {
+      this.gain = receiver.autoGain ? { autoGain: true } : { autoGain: false, gainDb: Math.max(0, Math.min(50, receiver.gainDb)) };
+    }
     let connectedNow = false;
     if (receiver.status !== "playing" || receiver.connection !== "rtltcp") {
       if (receiver.status === "playing") await this.command("stop");
@@ -76,6 +84,11 @@ export class AutofinderService {
       if (receiver.status !== "playing" || receiver.connection !== "rtltcp") throw new Error("Dedicated receiver did not enter real rtl_tcp playback");
       connectedNow = true;
       this.startedFinder = false;
+    }
+    if (this.gain && (connectedNow || this.gainPending)) {
+      // Apply once, not on each heartbeat: AGC and cleaner overload feedback may adjust gain.
+      receiver = await this.command("configure", this.gain) as SdrState;
+      this.gainPending = false;
     }
 
     let finder = await this.command("autofinder_state") as FinderState;
@@ -113,8 +126,19 @@ export class AutofinderService {
     this.startedFinder = false;
   }
 
-  control(action: ServiceAction): Promise<void> {
+  control(input: ServiceAction | ServiceControl): Promise<void> {
     return this.exclusive(async () => {
+      const command = typeof input === "string" ? { action: input } : input;
+      const action = command.action;
+      if (command.action === "gain") {
+        this.gain = command.autoGain ? { autoGain: true } : { autoGain: false, gainDb: command.gainDb };
+        this.gainPending = true;
+        // Persist even while paused, yielding, waiting, or temporarily unable to configure hardware.
+        const previous = this.lastStatus;
+        await this.status(previous?.status ?? "waiting", previous?.message ?? "Gain saved for the background receiver.", previous?.receiver, previous?.finder);
+        await this.scan();
+        return;
+      }
       if (action === "skip") {
         if (!this.selected || !this.owned) throw new Error("No signal is being checked by the background finder.");
         await this.command("autofinder_skip");

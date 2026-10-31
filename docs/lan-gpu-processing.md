@@ -6,8 +6,9 @@ and live audio distribution remain on the receiver host. Only demodulated mono
 audio crosses an authenticated server-to-server connection. The GPU machine does
 not need an SDR, browser, microphone, FAISS library, or access to receiver control.
 
-This is wired into the existing automatic cleaner, including background findings
-and **Listen live**. It is not a separate manual upload tool. Radio and Stations
+This is wired into the existing automatic cleaner, including background findings,
+**Listen live**, and on-demand **Clean this signal on server** for a manually tuned
+signal. It is not a separate file upload tool. Radio and Stations
 show the worker's idle health and the active stream's actual processing location,
 model, GPU name and measured round-trip latency. A reachable worker is not shown
 as active until its stream has warmed up. CPU processing is explicitly labeled CPU.

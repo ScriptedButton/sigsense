@@ -72,6 +72,14 @@ search waits while a paired browser is using RTL and resumes after disconnect.
 Normal RTL connections also request this handoff automatically. A 30-second
 reservation covers the interval before the new browser connects.
 
+**Background RF gain** changes only the dedicated scanning receiver. Enter
+0–50 dB and press **Apply manual gain**, or press **Auto gain** to return to
+automatic RF level control. Updates apply without restarting an active scan.
+While paused or yielding to live listening, the setting is saved and applied
+when background scanning resumes. The preference survives browser reconnects and
+service restarts. The panel also reports actual receiver gain and warns about
+ADC clipping; increasing gain does not by itself guarantee speech detection.
+
 Saved results remain visible if the service is offline; scan status is marked
 stale after 45 seconds without updates. Findings older than 30 minutes are marked
 as older reception. Speech activity is a measured fraction of audio, not a
@@ -119,3 +127,7 @@ acceptance, noise rejection, fading/reacquisition, stay/skip cooldowns, cancella
 during capture, manual takeover, AI failure, and bounded WAV validation. A known
 speech fixture produced 98.4% speech activity; a recent real 9.490 MHz noise
 recording produced 0%. Neither fixture result establishes a new received station.
+
+## Assistant
+
+The receiver has a command bar (press `/` or Ctrl/⌘+K) that drives the receiver from plain language. Set `ANTHROPIC_API_KEY` on the web server to enable it; `SIGSENSE_ASSISTANT_MODEL` overrides the model. Tool calls run in the browser through the same validated executor as the receiver-control broker.

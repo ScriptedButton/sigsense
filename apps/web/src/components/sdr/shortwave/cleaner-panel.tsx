@@ -98,7 +98,7 @@ export function CleanerPanel({ cleaning, muteLocal }: { cleaning?: CleanerState;
   return <section className="mt-3 rounded border border-line p-2" aria-label="Adaptive signal cleaning">
     <h4 className="text-xs font-medium text-ink">Adaptive signal cleaning</h4>
     <p className="mt-1 text-[0.65rem] text-muted">
-      {!cleaning || cleaning.status === "stopped" ? "Starts automatically when the finder confirms speech." : cleaning.status === "starting" ? "Starting backend noise suppression…" : cleaning.status === "error" ? cleaning.message : `${cleaning.profile ?? "Natural"} · ${cleaning.iterations ?? 0} optimization passes`}
+      {!cleaning || cleaning.status === "stopped" ? "Starts automatically when the finder confirms speech, or on demand with Clean this signal on server." : cleaning.status === "starting" ? "Starting backend noise suppression…" : cleaning.status === "error" ? cleaning.message : `${cleaning.profile ?? "Natural"} · ${cleaning.iterations ?? 0} optimization passes`}
     </p>
     {cleaning?.neuralAvailable === false && <p className="mt-1 text-[0.65rem] text-danger">Neural cleanup unavailable: {cleaning.warning}. Spectral cleanup remains active.</p>}
     {processing && <p className="mt-1 text-[0.65rem] text-muted" aria-label="Active processing location">

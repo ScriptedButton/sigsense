@@ -3,6 +3,8 @@
 export type RailTab<T extends string> = {
   id: T;
   label: string;
+  /** Tooltip, e.g. what lives in the tab and its shortcut. */
+  title?: string;
   /** Optional live indicator (e.g. decoder running). */
   badge?: string | number | boolean;
 };
@@ -48,6 +50,7 @@ export function RailTabs<T extends string>({
             aria-selected={selected}
             aria-controls={`rail-panel-${tab.id}`}
             className={`rail-tab ${selected ? "rail-tab-active" : ""}`}
+            title={tab.title}
             tabIndex={selected ? 0 : -1}
             onClick={() => onChange(tab.id)}
             onKeyDown={(event) => {

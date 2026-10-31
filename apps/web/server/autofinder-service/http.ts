@@ -1,8 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { SERVICE_ACTIONS, type ServiceAction, type ServiceView } from "../../src/lib/sdr/autofinder/service-types";
+import { parseServiceControl, type ServiceControl, type ServiceView } from "../../src/lib/sdr/autofinder/service-types";
 
-export function createServiceServer(token: () => Promise<string>, view: () => ServiceView, control: (action: ServiceAction) => Promise<void>) {
+export function createServiceServer(token: () => Promise<string>, view: () => ServiceView, control: (command: ServiceControl) => Promise<void>) {
   return createServer(async (request, response) => {
     const send = (code: number, body: unknown) => {
       response.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -21,10 +21,11 @@ export function createServiceServer(token: () => Promise<string>, view: () => Se
         if (size > 1024) return send(413, { error: "Request too large" });
         chunks.push(Uint8Array.from(Buffer.from(chunk)));
       }
-      let body: { action?: unknown };
+      let body: unknown;
       try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { return send(400, { error: "Expected JSON" }); }
-      if (!body || typeof body.action !== "string" || !(SERVICE_ACTIONS as readonly string[]).includes(body.action)) return send(400, { error: "Unknown finder action" });
-      await control(body.action as ServiceAction);
+      const command = parseServiceControl(body);
+      if (!command) return send(400, { error: "Invalid finder command. Manual gain must be between 0 and 50 dB; Auto requires autoGain: true." });
+      await control(command);
       send(200, view());
     } catch (error) {
       send(502, { error: error instanceof Error ? error.message : "Background finder failed" });

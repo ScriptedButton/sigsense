@@ -102,6 +102,10 @@ function diagnosticMethod<T extends keyof DiagnosticController>(controller: Diag
   return method.bind(controller) as DiagnosticController[T];
 }
 
+let sharedSpectrum: ReceiverSpectrum | null = null;
+/** Latest decimated spectrum seen by the control client; lets in-page features reuse the command executor. */
+export function getLatestReceiverSpectrum(): ReceiverSpectrum | null { return sharedSpectrum; }
+
 export function createReceiverCommandExecutor(controller: RadioController, getSpectrum: () => ReceiverSpectrum | null) {
   const diagnostic = controller as DiagnosticController;
   return async (command: ReceiverCommand): Promise<unknown> => {
@@ -263,6 +267,7 @@ export function startReceiverControlClient(controller: RadioController): () => v
     latestSpectrum = { values: shifted, centerHz: center, sampleRate, centerOffsetHz: info?.centerOffsetHz ?? 0,
       startHz: center + (info?.centerOffsetHz ?? 0) - Math.floor(values.length / 2) * sampleRate / values.length,
       binOrder: "ascending-frequency", binHz: sampleRate / values.length * stride, capturedAt: new Date().toISOString() };
+    sharedSpectrum = latestSpectrum;
     telemetry();
   };
   const unsubscribeSpectrum = controller.onSpectrum(spectrumListener, true);

@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import type { ServiceSnapshot, ServiceStatus, ServiceView } from "../../src/lib/sdr/autofinder/service-types";
-import { SERVICE_STALE_MS } from "../../src/lib/sdr/autofinder/service-types";
+import { parseServiceControl, SERVICE_STALE_MS } from "../../src/lib/sdr/autofinder/service-types";
 
 export function statusPath() {
   return process.env.SIGSENSE_AUTOFINDER_STATUS ?? resolve(process.cwd(), "../../.runtime/autofinder-service.json");
@@ -17,7 +17,9 @@ export async function readSnapshot(path = statusPath()): Promise<ServiceSnapshot
   try {
     const saved = JSON.parse(await readFile(/* turbopackIgnore: true */ path, "utf8"));
     if (saved.version !== 1 || !Array.isArray(saved.findings) || !Array.isArray(saved.checks)) return emptySnapshot();
-    return { ...saved, findings: saved.findings.slice(0, 200), checks: saved.checks.slice(0, 500) };
+    const control = parseServiceControl({ ...saved.gain, action: "gain" });
+    const gain = control?.action === "gain" ? control.autoGain ? { autoGain: true as const } : { autoGain: false as const, gainDb: control.gainDb } : undefined;
+    return { ...saved, gain, findings: saved.findings.slice(0, 200), checks: saved.checks.slice(0, 500) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return emptySnapshot();
     throw error;
